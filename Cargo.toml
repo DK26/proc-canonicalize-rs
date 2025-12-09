@@ -1,0 +1,27 @@
+[package]
+name = "proc-canonicalize"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.70.0"
+description = "Fix std::fs::canonicalize for /proc/PID/root and /proc/PID/cwd paths on Linux"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/DK26/proc-canonicalize-rs"
+documentation = "https://docs.rs/proc-canonicalize"
+readme = "README.md"
+keywords = ["proc", "canonicalize", "container", "namespace", "linux"]
+categories = ["filesystem", "os::linux-apis"]
+
+[dependencies]
+# Zero dependencies by default!
+# Optional: dunce for Windows path simplification (removes \\?\ prefix)
+dunce = { version = "1", optional = true }
+
+[features]
+default = []
+# Enable dunce to simplify Windows extended-length paths (\\?\C:\... -> C:\...)
+dunce = ["dep:dunce"]
+
+[dev-dependencies]
+# MSRV guard: tempfile >=3.22 pulls windows-sys 0.61+ requiring rustc >=1.71.
+# 3.21 is the last known version that builds cleanly on Rust 1.70.0.
+tempfile = "=3.21" # Do not update
