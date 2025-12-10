@@ -1,5 +1,6 @@
 # proc-canonicalize
 
+[![CI](https://github.com/DK26/proc-canonicalize-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/DK26/proc-canonicalize-rs/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/proc-canonicalize.svg)](https://crates.io/crates/proc-canonicalize)
 [![Documentation](https://docs.rs/proc-canonicalize/badge.svg)](https://docs.rs/proc-canonicalize)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
