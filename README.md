@@ -1,4 +1,4 @@
-﻿# proc-canonicalize
+# proc-canonicalize
 
 [![Crates.io](https://img.shields.io/crates/v/proc-canonicalize.svg)](https://crates.io/crates/proc-canonicalize)
 [![Documentation](https://docs.rs/proc-canonicalize/badge.svg)](https://docs.rs/proc-canonicalize)
@@ -97,7 +97,7 @@ Simplifies Windows extended-length paths by removing the `\\?\` prefix when poss
 
 ```toml
 [dependencies]
-proc-canonicalize = { version = "0.1", features = ["dunce"] }
+proc-canonicalize = { version = "0.0.2", features = ["dunce"] }
 ```
 
 **Behavior:**
@@ -116,7 +116,7 @@ This crate has **no dependencies** beyond the Rust standard library.
 
 ```toml
 [dependencies]
-proc-canonicalize = "0.1"
+proc-canonicalize = "0.0.2"
 ```
 
 ## License

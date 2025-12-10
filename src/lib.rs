@@ -40,8 +40,8 @@
 //! ## Optional Features
 //!
 //! - `dunce` (Windows only): Simplifies Windows extended-length paths by removing the `\\?\` prefix
-//!   when possible (e.g., `\\?\C:\foo` becomes `C:\foo`). This makes paths more readable but may
-//!   lose some Windows path capabilities. Enable with `features = ["dunce"]` in your `Cargo.toml`.
+//!   when possible (e.g., `\\?\C:\foo` becomes `C:\foo`). Automatically preserves the prefix when
+//!   needed (e.g., for paths longer than 260 characters). Enable with `features = ["dunce"]`.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

@@ -18,7 +18,7 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
             $env:PATH = "$(Split-Path $cargoPath);$env:PATH"
             Write-Host "* Found cargo at: $cargoPath" -ForegroundColor Green
             break
-        fi
+        }
     }
     
     if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
@@ -68,11 +68,16 @@ foreach ($file in $files) {
     if (Test-Path $file) {
         try {
             $content = Get-Content $file -Encoding UTF8 -ErrorAction Stop
-            $bytes = [System.IO.File]::ReadAllBytes($file)
-            if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
-                Write-Host "WARNING: $file has UTF-8 BOM" -ForegroundColor Yellow
+            # Check for UTF-8 BOM (EF BB BF) - only the first 3 bytes
+            $stream = [System.IO.File]::OpenRead($file)
+            $bom = New-Object byte[] 3
+            $bytesRead = $stream.Read($bom, 0, 3)
+            $stream.Close()
+            
+            if ($bytesRead -ge 3 -and $bom[0] -eq 0xEF -and $bom[1] -eq 0xBB -and $bom[2] -eq 0xBF) {
+                Write-Host "WARNING: $file has UTF-8 BOM (may cause issues with cargo publish)" -ForegroundColor Yellow
             } else {
-                Write-Host "OK: $file - UTF-8 encoding verified" -ForegroundColor Green
+                Write-Host "OK: $file - UTF-8 encoding verified, no BOM" -ForegroundColor Green
             }
         } catch {
             Write-Host "ERROR: $file encoding issue" -ForegroundColor Red
