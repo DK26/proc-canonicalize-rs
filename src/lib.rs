@@ -87,7 +87,10 @@ fn canonicalize_impl(path: &Path) -> io::Result<PathBuf> {
         if !namespace_prefix.exists() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("namespace path does not exist: {}", namespace_prefix.display()),
+                format!(
+                    "namespace path does not exist: {}",
+                    namespace_prefix.display()
+                ),
             ));
         }
 
@@ -98,11 +101,11 @@ fn canonicalize_impl(path: &Path) -> io::Result<PathBuf> {
             // Path goes through namespace boundary (e.g., "/proc/1234/root/etc/passwd")
             // Canonicalize the full path, then re-attach the namespace prefix
             let full_path = namespace_prefix.join(&remainder);
-            
+
             // Use std::fs::canonicalize on the full path - this will traverse
             // through /proc/PID/root correctly, but return a path without the prefix
             let canonicalized = std::fs::canonicalize(&full_path)?;
-            
+
             // The result will be something like "/etc/passwd" (the container's view)
             // We need to re-attach the namespace prefix
             Ok(namespace_prefix.join(canonicalized.strip_prefix("/").unwrap_or(&canonicalized)))
@@ -300,6 +303,244 @@ mod tests {
             let std_result = std::fs::canonicalize(&proc_pid_root).expect("should succeed");
             assert_eq!(std_result, PathBuf::from("/"));
         }
+
+        #[test]
+        fn test_canonicalize_proc_self_cwd() {
+            // /proc/self/cwd should also be preserved
+            let result = canonicalize("/proc/self/cwd").expect("should succeed");
+            assert_eq!(result, PathBuf::from("/proc/self/cwd"));
+        }
+
+        #[test]
+        fn test_canonicalize_nonexistent_file_under_namespace() {
+            // Non-existent file under valid namespace should return NotFound error
+            let result = canonicalize("/proc/self/root/this_file_definitely_does_not_exist_12345");
+            assert!(result.is_err());
+            let err = result.unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        }
+
+        #[test]
+        fn test_canonicalize_nonexistent_pid() {
+            // Very high PID that almost certainly doesn't exist
+            let result = canonicalize("/proc/4294967295/root");
+            assert!(result.is_err());
+            let err = result.unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        }
+
+        #[test]
+        fn test_canonicalize_with_dotdot_normalization() {
+            // Path with .. that should be normalized but stay within namespace
+            let result = canonicalize("/proc/self/root/etc/../etc/passwd");
+            // This should either succeed (if /etc/passwd exists) or fail with NotFound
+            // But if it succeeds, it must preserve the namespace prefix
+            if let Ok(path) = result {
+                assert!(
+                    path.starts_with("/proc/self/root"),
+                    "should preserve namespace prefix, got: {:?}",
+                    path
+                );
+            }
+        }
+
+        #[test]
+        fn test_canonicalize_with_dotdot_at_boundary() {
+            // Try to escape with .. - should still be contained
+            // /proc/self/root/../root/etc should resolve within namespace
+            let result = canonicalize("/proc/self/root/tmp/../etc");
+            if let Ok(path) = result {
+                assert!(
+                    path.starts_with("/proc/self/root"),
+                    "should preserve namespace prefix even with .., got: {:?}",
+                    path
+                );
+            }
+        }
+
+        #[test]
+        fn test_canonicalize_deep_nested_path() {
+            // Deep nested path under namespace
+            let result = canonicalize("/proc/self/root/usr/share/doc");
+            if let Ok(path) = result {
+                assert!(
+                    path.starts_with("/proc/self/root"),
+                    "should preserve namespace prefix for deep paths, got: {:?}",
+                    path
+                );
+            }
+        }
+
+        #[test]
+        fn test_canonicalize_trailing_slash() {
+            // Trailing slash should still work
+            let result = canonicalize("/proc/self/root/");
+            // Note: std::fs::canonicalize typically strips trailing slashes
+            if let Ok(path) = result {
+                assert!(
+                    path.starts_with("/proc/self/root"),
+                    "should handle trailing slash, got: {:?}",
+                    path
+                );
+            }
+        }
+
+        #[test]
+        fn test_canonicalize_thread_self() {
+            // /proc/thread-self/root should also work
+            let result = canonicalize("/proc/thread-self/root");
+            if let Ok(path) = result {
+                assert_eq!(path, PathBuf::from("/proc/thread-self/root"));
+            }
+            // Note: thread-self might not exist on all systems, so we allow failure
+        }
+
+        #[test]
+        fn test_canonicalize_symlink_resolution_within_namespace() {
+            // /etc/mtab is often a symlink - verify symlinks are resolved
+            // but namespace prefix is preserved
+            let result = canonicalize("/proc/self/root/etc/mtab");
+            if let Ok(path) = result {
+                assert!(
+                    path.starts_with("/proc/self/root"),
+                    "symlink resolution should preserve namespace, got: {:?}",
+                    path
+                );
+            }
+        }
+
+        #[test]
+        fn test_find_namespace_boundary_with_trailing_slash() {
+            // Path with trailing slash
+            let result = find_namespace_boundary(Path::new("/proc/1234/root/"));
+            assert!(result.is_some());
+            let (prefix, _remainder) = result.unwrap();
+            assert_eq!(prefix, PathBuf::from("/proc/1234/root"));
+            // Remainder might be empty or contain just a component depending on how trailing slash is parsed
+        }
+
+        #[test]
+        fn test_find_namespace_boundary_with_dots() {
+            // Path with . and .. components - these get normalized by Path
+            let result = find_namespace_boundary(Path::new("/proc/1234/root/./etc/../etc"));
+            assert!(result.is_some());
+            let (prefix, _remainder) = result.unwrap();
+            assert_eq!(prefix, PathBuf::from("/proc/1234/root"));
+            // Remainder will contain the unnormalized path components
+        }
+
+        #[test]
+        fn test_canonicalize_permission_denied() {
+            // Try to access another process's namespace without permission
+            // PID 1 is usually init and may have restricted access
+            let result = canonicalize("/proc/1/root/etc/shadow");
+            // This should either succeed or fail with PermissionDenied or NotFound
+            // depending on system configuration
+            if let Err(e) = result {
+                assert!(
+                    e.kind() == io::ErrorKind::PermissionDenied
+                        || e.kind() == io::ErrorKind::NotFound,
+                    "expected PermissionDenied or NotFound, got: {:?}",
+                    e.kind()
+                );
+            }
+        }
+
+        #[test]
+        fn test_canonicalize_pid_1_root() {
+            // PID 1 is always init/systemd - a real external process
+            // This is the realistic scenario: accessing another process's namespace
+            let result = canonicalize("/proc/1/root");
+
+            match result {
+                Ok(path) => {
+                    // If we have permission, the prefix MUST be preserved
+                    assert_eq!(
+                        path,
+                        PathBuf::from("/proc/1/root"),
+                        "must preserve /proc/1/root prefix"
+                    );
+
+                    // Verify std::fs::canonicalize would return "/" (the problem we're fixing)
+                    let std_result =
+                        std::fs::canonicalize("/proc/1/root").expect("std should also succeed");
+                    assert_eq!(std_result, PathBuf::from("/"), "std resolves to /");
+                }
+                Err(e) => {
+                    // Permission denied is acceptable - we're accessing another process
+                    assert!(
+                        e.kind() == io::ErrorKind::PermissionDenied
+                            || e.kind() == io::ErrorKind::NotFound,
+                        "expected PermissionDenied or NotFound, got: {:?}",
+                        e.kind()
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn test_canonicalize_pid_1_root_subpath() {
+            // Access a file through PID 1's namespace - realistic container scenario
+            let result = canonicalize("/proc/1/root/etc/hostname");
+
+            match result {
+                Ok(path) => {
+                    // Path MUST preserve the namespace boundary
+                    assert!(
+                        path.starts_with("/proc/1/root"),
+                        "must preserve /proc/1/root prefix, got: {:?}",
+                        path
+                    );
+                }
+                Err(e) => {
+                    // Permission denied or file not found is acceptable
+                    assert!(
+                        e.kind() == io::ErrorKind::PermissionDenied
+                            || e.kind() == io::ErrorKind::NotFound,
+                        "expected PermissionDenied or NotFound, got: {:?}",
+                        e.kind()
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn test_canonicalize_pid_1_cwd() {
+            // Test /proc/1/cwd - the working directory of init
+            let result = canonicalize("/proc/1/cwd");
+
+            match result {
+                Ok(path) => {
+                    assert_eq!(
+                        path,
+                        PathBuf::from("/proc/1/cwd"),
+                        "must preserve /proc/1/cwd"
+                    );
+                }
+                Err(e) => {
+                    assert!(
+                        e.kind() == io::ErrorKind::PermissionDenied
+                            || e.kind() == io::ErrorKind::NotFound,
+                        "expected PermissionDenied or NotFound, got: {:?}",
+                        e.kind()
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn test_self_vs_pid_equivalence() {
+            // /proc/self/root and /proc/{our_pid}/root should behave the same
+            use std::process;
+            let pid = process::id();
+
+            let self_result = canonicalize("/proc/self/root").expect("self should work");
+            let pid_result = canonicalize(format!("/proc/{}/root", pid)).expect("pid should work");
+
+            // Both should preserve their respective prefixes
+            assert_eq!(self_result, PathBuf::from("/proc/self/root"));
+            assert_eq!(pid_result, PathBuf::from(format!("/proc/{}/root", pid)));
+        }
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -313,21 +554,21 @@ mod tests {
             let our_result = canonicalize(&tmp).expect("should succeed");
             let std_result = std::fs::canonicalize(&tmp).expect("should succeed");
             // With dunce feature on Windows, our result is simplified but std returns UNC
-        #[cfg(all(feature = "dunce", windows))]
-        {
-            let our_str = our_result.to_string_lossy();
-            let std_str = std_result.to_string_lossy();
-            // dunce should simplify the path
-            assert!(!our_str.starts_with(r"\\?\"), "dunce should simplify path");
-            assert!(std_str.starts_with(r"\\?\"), "std returns UNC format");
-            // They should match except for the UNC prefix
-            assert_eq!(our_str.as_ref(), std_str.trim_start_matches(r"\\?\"));
-        }
-        // Without dunce (or on non-Windows), they should match exactly
-        #[cfg(not(all(feature = "dunce", windows)))]
-        {
-            assert_eq!(our_result, std_result);
-        }
+            #[cfg(all(feature = "dunce", windows))]
+            {
+                let our_str = our_result.to_string_lossy();
+                let std_str = std_result.to_string_lossy();
+                // dunce should simplify the path
+                assert!(!our_str.starts_with(r"\\?\"), "dunce should simplify path");
+                assert!(std_str.starts_with(r"\\?\"), "std returns UNC format");
+                // They should match except for the UNC prefix
+                assert_eq!(our_str.as_ref(), std_str.trim_start_matches(r"\\?\"));
+            }
+            // Without dunce (or on non-Windows), they should match exactly
+            #[cfg(not(all(feature = "dunce", windows)))]
+            {
+                assert_eq!(our_result, std_result);
+            }
         }
     }
 }

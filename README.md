@@ -72,17 +72,17 @@ fn read_container_file(container_pid: u32, path: &str) -> std::io::Result<Vec<u8
 
 ## Supported Paths
 
-| Path Pattern | Preserved |
-| ------------ | --------- ||
-| `/proc/PID/root` | ✅ |
-| `/proc/PID/root/...` | ✅ |
-| `/proc/PID/cwd` | ✅ |
-| `/proc/PID/cwd/...` | ✅ |
-| `/proc/self/root` | ✅ |
-| `/proc/self/cwd` | ✅ |
-| `/proc/thread-self/root` | ✅ |
-| `/proc/thread-self/cwd` | ✅ |
-| All other paths | Same as `std::fs::canonicalize` |
+| Path Pattern             | Preserved                       |
+| ------------------------ | ------------------------------- |
+| `/proc/PID/root`         | ✅                               |
+| `/proc/PID/root/...`     | ✅                               |
+| `/proc/PID/cwd`          | ✅                               |
+| `/proc/PID/cwd/...`      | ✅                               |
+| `/proc/self/root`        | ✅                               |
+| `/proc/self/cwd`         | ✅                               |
+| `/proc/thread-self/root` | ✅                               |
+| `/proc/thread-self/cwd`  | ✅                               |
+| All other paths          | Same as `std::fs::canonicalize` |
 
 ## Platform Support
 
@@ -104,9 +104,9 @@ proc-canonicalize = { version = "0.1", features = ["dunce"] }
 - Without `dunce`: Returns `\\?\C:\Users\Alice\file.txt` (Windows extended-length format)
 - With `dunce`: Returns `C:\Users\Alice\file.txt` (simplified format)
 
-**Trade-offs:**
+**Benefits:**
 - ✅ More readable paths in logs and user output
-- ❌ May lose some Windows path capabilities (paths longer than 260 characters, certain special characters)
+- ✅ Automatically preserves `\\?\` prefix when needed (e.g., for paths longer than 260 characters)
 
 ## Zero Dependencies
 

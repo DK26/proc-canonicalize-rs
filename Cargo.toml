@@ -1,6 +1,6 @@
 [package]
 name = "proc-canonicalize"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 rust-version = "1.70.0"
 description = "Fix std::fs::canonicalize for /proc/PID/root and /proc/PID/cwd paths on Linux"
@@ -13,12 +13,16 @@ categories = ["filesystem", "os::linux-apis"]
 
 [dependencies]
 # Zero dependencies by default!
+
 # Optional: dunce for Windows path simplification (removes \\?\ prefix)
+# Target-conditional: only adds dependency on Windows
+[target.'cfg(windows)'.dependencies]
 dunce = { version = "1", optional = true }
 
 [features]
 default = []
 # Enable dunce to simplify Windows extended-length paths (\\?\C:\... -> C:\...)
+# On non-Windows platforms, this feature has no effect and adds no dependencies.
 dunce = ["dep:dunce"]
 
 [dev-dependencies]
