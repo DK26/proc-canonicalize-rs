@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate file encodings
+        shell: bash
+        run: |
+          echo "🔍 Validating UTF-8 encoding for critical files..."
+
+          check_utf8() {
+            local file="$1"
+            if [ ! -f "$file" ]; then
+              echo "❌ File not found: $file"
+              return 1
+            fi
+            if command -v file >/dev/null 2>&1; then
+              local file_output=$(file "$file")
+              if echo "$file_output" | grep -q "UTF-8\|ASCII\|text\|[Ss]ource"; then
+                echo "✅ $file: UTF-8 encoding verified"
+              else
+                echo "❌ $file is not UTF-8 encoded"
+                return 1
+              fi
+            fi
+          }
+
+          check_utf8 "README.md"
+          check_utf8 "Cargo.toml"
+          find src -name "*.rs" | while read file; do
+            check_utf8 "$file"
+          done
+          echo "🎉 All file encoding checks passed!"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target/
+          key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-build-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test --verbose
+
+      - name: Test dunce feature (Windows only)
+        if: runner.os == 'Windows'
+        run: cargo test --features dunce --verbose
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check documentation
+        run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  msrv:
+    name: Minimum Supported Rust Version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.70
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.70.0
+          components: clippy
+
+      - name: Check with MSRV
+        run: cargo check --verbose
+
+      - name: Run clippy with MSRV
+        run: cargo clippy --all-targets --all-features -- -D warnings
