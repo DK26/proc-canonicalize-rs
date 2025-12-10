@@ -104,7 +104,7 @@ fn canonicalize_impl(path: &Path) -> io::Result<PathBuf> {
 
             // Use std::fs::canonicalize on the full path - this will traverse
             // through /proc/PID/root correctly, but return a path without the prefix
-            let canonicalized = std::fs::canonicalize(&full_path)?;
+            let canonicalized = std::fs::canonicalize(full_path)?;
 
             // The result will be something like "/etc/passwd" (the container's view)
             // We need to re-attach the namespace prefix

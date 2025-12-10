@@ -87,8 +87,9 @@ run_check "Documentation" "RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --all-
 # MSRV check (optional - requires rustup)
 if command -v rustup &> /dev/null; then
     echo "Checking MSRV (1.70.0)..."
-    if rustup run 1.70.0 cargo check 2>/dev/null; then
-        echo "✓ MSRV check passed"
+    if rustup run 1.70.0 cargo --version &>/dev/null; then
+        run_check "MSRV cargo check" "rustup run 1.70.0 cargo check --verbose"
+        run_check "MSRV clippy" "rustup run 1.70.0 cargo clippy --all-targets --all-features -- -D warnings"
     else
         echo "⚠️  MSRV 1.70.0 not installed, skipping MSRV check"
         echo "   Install with: rustup install 1.70.0"
