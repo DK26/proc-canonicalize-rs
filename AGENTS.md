@@ -29,6 +29,28 @@ Do not change signatures or remove items without a clear migration plan and test
 - Non-Linux platforms: Fall back to `std::fs::canonicalize` directly.
 - Optional `dunce` feature (Windows only): Simplifies extended-length paths on Windows.
 
+## Security Architecture & Path Resolution
+
+To prevent namespace escapes and ensure security, the library follows a strict resolution order:
+
+1. **Indirect Symlink Detection**: Before processing, we check if the path contains symlinks that point to a `/proc` magic path (e.g., `/tmp/link -> /proc`).
+   - *Why*: If we passed `/tmp/link/self/root` directly to `std::fs::canonicalize`, it would resolve the symlink to `/proc`, see it's a magic link, and resolve it to `/` (host root), bypassing our protection.
+   - *Rule*: Any path that *resolves* to a magic path must be treated as a magic path.
+
+2. **Prefix Resolution**: When a magic path is found (e.g., `/proc/self/root/etc`), we:
+   - Resolve the prefix (`/proc/self/root`) to its absolute host path (e.g., `/proc/1234/root`).
+   - Canonicalize the full path (`/proc/1234/root/etc`).
+   - Strip the resolved prefix from the full path.
+   - Re-attach the original magic prefix.
+
+3. **Escape Detection**: If the stripped path cannot be re-attached (e.g., it resolved to `../../etc`), we return the absolute path. We never return a path that claims to be inside the namespace if it actually escaped it.
+
+## Known Limitations
+
+- **Bind Mounts**: Paths involving bind mounts of `/proc` (e.g., `mount --bind /proc /mnt/proc`) are not detected as magic paths unless they explicitly use the `/proc` path. The library relies on path pattern matching (`/proc/PID/...`).
+- **Race Conditions (TOCTOU)**: While we check for symlinks before canonicalization, a malicious actor could theoretically swap a path component to a magic symlink *after* our check but *before* the underlying `std::fs::canonicalize` call. This is an inherent limitation of user-space path sanitization without open-at-style syscalls.
+- **Non-Standard /proc Mounts**: If `/proc` is mounted at a different location (e.g., `/custom/proc`), it will not be detected.
+
 ## Repository Layout
 
 - `src/lib.rs`: Core algorithm, Linux/non-Linux branches, helpers, tests.
@@ -54,6 +76,7 @@ These scripts:
 - Allocation: Avoid unnecessary allocations; prefer `PathBuf` and component streaming.
 - Platform cfg: Keep Linux/non-Linux branches correct; don't introduce behavioral drift.
 - Dependencies: Do not add runtime dependencies. If you believe one is strictly necessary, open an issue first.
+- **MSRV Compliance**: We support Rust 1.70.0. Run `rustup run 1.70.0 cargo clippy` to catch version-specific lints (e.g., `clippy::needless_borrow` behavior changes between versions).
 - **dunce feature usage (CRITICAL)**: Any code that uses `dunce::` functions MUST be guarded with `#[cfg(all(feature = "dunce", windows))]`. The dunce crate is a Windows-only target-conditional dependency.
 
 ## Documentation Examples (CRITICAL)
@@ -125,6 +148,60 @@ assert_eq!(resolved, PathBuf::from("/proc/self/root"));
 - Coverage areas include: namespace boundary detection, PID validation, existing/non-existing paths, permission errors, symlink resolution within namespaces.
 - When changing behavior, add focused tests alongside the changed logic.
 - Keep tests deterministic and filesystem-safe.
+
+### Namespace Testing Guidelines (CRITICAL)
+
+When writing or reviewing tests for `/proc` namespace paths, follow these rules to ensure comprehensive coverage:
+
+#### 1. Namespace Type Symmetry
+For every test on `/proc/.../root`, write a parallel test for `/proc/.../cwd`. They behave differently:
+- `/proc/self/root` typically resolves to `/` on the host
+- `/proc/self/cwd` resolves to the actual working directory (NOT `/`)
+
+**Example of missing symmetry (BAD):**
+```rust
+// Only tests root - what about cwd?
+fn test_canonicalize_proc_self_root() { ... }
+```
+
+**Correct approach (GOOD):**
+```rust
+fn test_canonicalize_proc_self_root() { ... }
+fn test_canonicalize_proc_self_cwd() { ... }  // Parallel test
+```
+
+#### 2. Test "Paths Through", Not Just "Prefix Alone"
+Always test accessing files *through* the namespace, not just the namespace prefix itself:
+
+**Insufficient (BAD):**
+```rust
+canonicalize("/proc/self/cwd")  // Only tests the prefix
+```
+
+**Comprehensive (GOOD):**
+```rust
+canonicalize("/proc/self/cwd")           // Prefix alone
+canonicalize("/proc/self/cwd/file.txt")  // Path THROUGH the namespace
+canonicalize("/proc/self/cwd/dir/file")  // Deeper path through
+```
+
+#### 3. Test Namespace Escape via `..`
+Paths using `..` can escape the namespace. Test both cases:
+- `..` that stays inside (e.g., `/proc/self/root/../etc` → still inside because `..` from `/` is `/`)
+- `..` that escapes (e.g., `/proc/self/cwd/..` → escapes to parent of cwd)
+
+#### 4. Test Non-Root Namespace Targets
+The namespace prefix may not resolve to `/`. Ensure tests cover:
+- Direct paths where prefix resolves to `/` (e.g., `/proc/self/root` on host)
+- Indirect symlinks that exercise non-`/` prefix resolution
+- Container-like scenarios where `/proc/PID/root` is not `/`
+
+#### 5. Invariant Tests
+Add property-based tests that verify invariants:
+```rust
+// Invariant 1: Result is either prefixed OR escaped absolute
+// Invariant 2: canonicalize(canonicalize(x)) == canonicalize(x)
+```
 
 ### Bug Fix Methodology (CRITICAL)
 
@@ -200,6 +277,30 @@ cargo test --features dunce --verbose
 
 - Tag as `vX.Y.Z` to trigger publish and GitHub Release via workflows.
 - Update `CHANGELOG.md` with clear, user-facing notes.
+
+### CHANGELOG Guidelines
+
+The CHANGELOG is for **users**, not developers. Only include changes that affect the public API or user experience.
+
+**DO include:**
+- Bug fixes that affected user-facing behavior
+- New features or API additions
+- Breaking changes or deprecations
+- Security fixes
+- Performance improvements users would notice
+
+**DO NOT include:**
+- Internal refactoring
+- Test additions or changes
+- Documentation updates (unless significant)
+- CI/tooling changes
+- Code style fixes
+- Updates to AGENTS.md or other contributor docs
+
+**Format:**
+- Keep entries concise (1-2 sentences)
+- Focus on *what changed* for the user, not *how* it was implemented
+- Technical root cause details belong in commit messages or PR descriptions, not CHANGELOG
 
 ---
 

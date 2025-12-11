@@ -94,8 +94,11 @@ const MAX_SYMLINK_FOLLOWS: u32 = 40;
 /// Canonicalize a path, preserving Linux `/proc/PID/root` and `/proc/PID/cwd` boundaries.
 ///
 /// This function behaves like [`std::fs::canonicalize`], except that on Linux it
-/// detects and preserves namespace boundary prefixes (`/proc/PID/root`, `/proc/PID/cwd`,
-/// `/proc/self/root`, `/proc/self/cwd`, `/proc/thread-self/root`, `/proc/thread-self/cwd`).
+/// detects and preserves namespace boundary prefixes:
+/// - `/proc/PID/root`, `/proc/PID/cwd`
+/// - `/proc/PID/task/TID/root`, `/proc/PID/task/TID/cwd`
+/// - `/proc/self/root`, `/proc/self/cwd`
+/// - `/proc/thread-self/root`, `/proc/thread-self/cwd`
 ///
 /// # Examples
 ///
@@ -141,31 +144,37 @@ fn canonicalize_impl(path: &Path) -> io::Result<PathBuf> {
     // Check if path contains a /proc namespace boundary
     if let Some((namespace_prefix, remainder)) = find_namespace_boundary(path) {
         // Verify the namespace prefix exists and is accessible
-        if !namespace_prefix.exists() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!(
-                    "namespace path does not exist: {}",
-                    namespace_prefix.display()
-                ),
-            ));
-        }
+        // We use metadata() to check existence and permissions, which gives better error messages
+        // than exists() (e.g. PermissionDenied vs NotFound)
+        std::fs::metadata(&namespace_prefix)?;
 
         if remainder.as_os_str().is_empty() {
             // Path IS the namespace boundary (e.g., "/proc/1234/root")
             Ok(namespace_prefix)
         } else {
             // Path goes through namespace boundary (e.g., "/proc/1234/root/etc/passwd")
-            // Canonicalize the full path, then re-attach the namespace prefix
-            let full_path = namespace_prefix.join(&remainder);
 
-            // Use std::fs::canonicalize on the full path - this will traverse
-            // through /proc/PID/root correctly, but return a path without the prefix
+            // 1. Resolve the namespace prefix to its absolute path on the host.
+            // This is necessary because /proc/PID/root might not be "/" (e.g. in containers),
+            // and /proc/PID/cwd is almost certainly not "/".
+            let resolved_prefix = std::fs::canonicalize(&namespace_prefix)?;
+
+            // 2. Canonicalize the full path.
+            // This traverses the magic link and resolves everything.
+            let full_path = namespace_prefix.join(&remainder);
             let canonicalized = std::fs::canonicalize(full_path)?;
 
-            // The result will be something like "/etc/passwd" (the container's view)
-            // We need to re-attach the namespace prefix
-            Ok(namespace_prefix.join(canonicalized.strip_prefix("/").unwrap_or(&canonicalized)))
+            // 3. Try to re-base the canonicalized path onto the namespace prefix.
+            // We do this by stripping the resolved prefix from the canonicalized path.
+            if let Ok(suffix) = canonicalized.strip_prefix(&resolved_prefix) {
+                // The path is within the namespace. Re-attach the prefix.
+                Ok(namespace_prefix.join(suffix))
+            } else {
+                // The path escaped the namespace (e.g. via ".." or symlinks to outside).
+                // In this case, we cannot preserve the prefix while being correct.
+                // We return the fully resolved path (absolute path on host).
+                Ok(canonicalized)
+            }
         }
     } else {
         // Check for indirect symlinks to /proc magic paths BEFORE calling std::fs::canonicalize.
@@ -238,21 +247,53 @@ fn find_namespace_boundary(path: &Path) -> Option<(PathBuf, PathBuf)> {
         return None;
     }
 
-    // Next must be "root" or "cwd"
-    let ns_type = match components.next() {
-        Some(Component::Normal(s)) if s == "root" || s == "cwd" => s,
+    // Next component determines if it's a direct namespace or a task namespace
+    let next_component = match components.next() {
+        Some(Component::Normal(s)) => s,
         _ => return None,
     };
 
-    // Build the namespace prefix: /proc/{pid}/{root|cwd}
-    let mut prefix = PathBuf::from("/proc");
-    prefix.push(pid_component);
-    prefix.push(ns_type);
+    if next_component == "root" || next_component == "cwd" {
+        // /proc/PID/root or /proc/PID/cwd
+        let mut prefix = PathBuf::from("/proc");
+        prefix.push(pid_component);
+        prefix.push(next_component);
 
-    // Collect remaining components as the remainder
-    let remainder: PathBuf = components.collect();
+        // Collect remaining components as the remainder
+        let remainder: PathBuf = components.collect();
+        Some((prefix, remainder))
+    } else if next_component == "task" {
+        // /proc/PID/task/TID/root or /proc/PID/task/TID/cwd
 
-    Some((prefix, remainder))
+        // Next must be TID (digits)
+        let tid_component = match components.next() {
+            Some(Component::Normal(s)) => s,
+            _ => return None,
+        };
+
+        let tid_str = tid_component.to_string_lossy();
+        if tid_str.is_empty() || !tid_str.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+
+        // Next must be root or cwd
+        let ns_type = match components.next() {
+            Some(Component::Normal(s)) if s == "root" || s == "cwd" => s,
+            _ => return None,
+        };
+
+        let mut prefix = PathBuf::from("/proc");
+        prefix.push(pid_component);
+        prefix.push("task");
+        prefix.push(tid_component);
+        prefix.push(ns_type);
+
+        // Collect remaining components as the remainder
+        let remainder: PathBuf = components.collect();
+        Some((prefix, remainder))
+    } else {
+        None
+    }
 }
 
 /// Check if a path is a `/proc` magic path (`/proc/{pid}/root` or `/proc/{pid}/cwd`).
@@ -268,57 +309,6 @@ fn is_proc_magic_path(path: &Path) -> bool {
     find_namespace_boundary(path).is_some()
 }
 
-/// Follow a symlink chain (with loop detection) to find if it leads to a `/proc` magic path.
-///
-/// Returns `Some(magic_path)` if the symlink chain leads to a `/proc/.../root` or `/proc/.../cwd`,
-/// or `None` if the chain leads elsewhere or loops.
-#[cfg(target_os = "linux")]
-fn follow_symlink_to_proc_magic(path: &Path) -> io::Result<Option<PathBuf>> {
-    let mut current = path.to_path_buf();
-    let mut iterations = 0;
-
-    loop {
-        // Check if we've hit the limit
-        if iterations >= MAX_SYMLINK_FOLLOWS {
-            return Ok(None); // Symlink loop or too deep, give up
-        }
-        iterations += 1;
-
-        // Get metadata without following symlinks
-        let metadata = match std::fs::symlink_metadata(&current) {
-            Ok(m) => m,
-            Err(_) => return Ok(None), // Path doesn't exist or inaccessible
-        };
-
-        if !metadata.is_symlink() {
-            // No longer a symlink, check if we ended up at a /proc magic path
-            return Ok(if is_proc_magic_path(&current) {
-                Some(current)
-            } else {
-                None
-            });
-        }
-
-        // Read where the symlink points
-        let target = std::fs::read_link(&current)?;
-
-        // Check if target is a /proc magic path BEFORE resolving further
-        // This catches symlinks that directly point to /proc/self/root etc.
-        let resolved_target = if target.is_relative() {
-            current.parent().unwrap_or(Path::new("/")).join(&target)
-        } else {
-            target
-        };
-
-        // Check if this resolved target is a /proc magic path
-        if is_proc_magic_path(&resolved_target) {
-            return Ok(Some(resolved_target));
-        }
-
-        current = resolved_target;
-    }
-}
-
 /// Detect if a path contains an indirect symlink to a `/proc` magic path.
 ///
 /// This walks the ancestor chain of the input path looking for symlinks that
@@ -327,63 +317,102 @@ fn follow_symlink_to_proc_magic(path: &Path) -> io::Result<Option<PathBuf>> {
 /// Returns `Some(magic_path)` with any remaining suffix if found, or `None` otherwise.
 #[cfg(target_os = "linux")]
 fn detect_indirect_proc_magic_link(path: &Path) -> io::Result<Option<PathBuf>> {
-    // Make path absolute
-    let absolute = if path.is_absolute() {
+    let mut current_path = if path.is_absolute() {
         path.to_path_buf()
     } else {
         std::env::current_dir()?.join(path)
     };
 
-    // Walk through the path from root towards the leaf, checking each component
-    // We need to resolve symlinks at each level to detect where they point
-    let mut accumulated = PathBuf::new();
-    let mut components = absolute.components().peekable();
+    let mut iterations = 0;
 
-    // Process root separately
-    if let Some(Component::RootDir) = components.peek() {
-        accumulated.push("/");
-        components.next();
-    }
+    // We restart the scan whenever we resolve a symlink
+    'scan: loop {
+        if iterations >= MAX_SYMLINK_FOLLOWS {
+            return Ok(None);
+        }
 
-    while let Some(component) = components.next() {
-        let Component::Normal(name) = component else {
-            // Handle CurDir (.) and ParentDir (..) by pushing them
-            // and letting the accumulated path normalize
+        // We CANNOT blindly normalize_path() here because if we have "symlink/..",
+        // normalize_path() will remove "symlink" and "..", completely missing the fact
+        // that "symlink" might point to a magic path.
+        //
+        // Instead, we must walk the components one by one. If we hit a symlink, we resolve it.
+        // If we hit "..", we pop from our accumulated path.
+
+        // Check if the path ITSELF is magic (e.g. after resolution)
+        // We still check this first because we might have just resolved a symlink to a magic path
+        if is_proc_magic_path(&current_path) {
+            return Ok(Some(current_path));
+        }
+
+        let mut accumulated = PathBuf::new();
+        let mut components = current_path.components().peekable();
+
+        if let Some(Component::RootDir) = components.peek() {
+            accumulated.push("/");
+            components.next();
+        }
+
+        while let Some(component) = components.next() {
             match component {
-                Component::CurDir => continue,
+                Component::RootDir => {
+                    accumulated.push("/");
+                }
+                Component::CurDir => {}
                 Component::ParentDir => {
                     accumulated.pop();
-                    continue;
+                    // After popping, we might be at a magic path (e.g. /proc/self/root/etc/..)
+                    if is_proc_magic_path(&accumulated) {
+                        // Reconstruct full path from here to preserve the magic prefix
+                        let remainder: PathBuf = components.collect();
+                        return Ok(Some(accumulated.join(remainder)));
+                    }
                 }
-                _ => continue,
-            }
-        };
+                Component::Normal(name) => {
+                    let next_path = accumulated.join(name);
 
-        let next_path = accumulated.join(name);
+                    // Check symlink
+                    let metadata = match std::fs::symlink_metadata(&next_path) {
+                        Ok(m) => m,
+                        Err(_) => {
+                            accumulated.push(name);
+                            continue;
+                        }
+                    };
 
-        // Check if this path component is a symlink
-        let metadata = match std::fs::symlink_metadata(&next_path) {
-            Ok(m) => m,
-            Err(_) => {
-                // Path doesn't exist, just continue accumulating
-                accumulated.push(name);
-                continue;
-            }
-        };
+                    if metadata.is_symlink() {
+                        // Found symlink!
+                        iterations += 1;
+                        let target = std::fs::read_link(&next_path)?;
 
-        if metadata.is_symlink() {
-            // This is a symlink - check if it points to a /proc magic path
-            if let Some(magic_path) = follow_symlink_to_proc_magic(&next_path)? {
-                // Found it! Reconstruct: magic_path + remaining components
-                let remainder: PathBuf = components.collect();
-                return Ok(Some(magic_path.join(remainder)));
+                        // Construct new path: accumulated (parent) + target + remainder
+                        let parent = next_path.parent().unwrap_or(Path::new("/"));
+                        let remainder: PathBuf = components.collect();
+
+                        let resolved = if target.is_relative() {
+                            parent.join(target)
+                        } else {
+                            target
+                        };
+
+                        current_path = resolved.join(remainder);
+                        continue 'scan; // Restart scan from root of new path
+                    }
+
+                    accumulated.push(name);
+                }
+                Component::Prefix(_) => unreachable!("Linux paths don't have prefixes"),
             }
         }
 
-        accumulated.push(name);
-    }
+        // If we reached here, we scanned the whole path and found no symlinks (or no more symlinks).
+        // And it wasn't magic (checked at start of loop).
+        // One final check on the accumulated path (which is effectively normalized now)
+        if is_proc_magic_path(&accumulated) {
+            return Ok(Some(accumulated));
+        }
 
-    Ok(None)
+        return Ok(None);
+    }
 }
 
 #[cfg(test)]

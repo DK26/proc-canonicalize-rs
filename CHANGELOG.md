@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Critical**: Fixed vulnerability where relative symlinks to `/proc` (e.g. `link -> ../proc/self/root`) could bypass namespace protection.
+- **Audit**: Added comprehensive security test suite covering double/triple indirection, symlink loops, and nested proc access.
+
+### Fixed
+
+- **Critical Bug**: Fixed path duplication when canonicalizing paths through `/proc/PID/cwd`
+  - Previously, `/proc/self/cwd/file.txt` incorrectly resolved to `/proc/self/cwd/home/user/project/file.txt`
+  - Now correctly resolves to `/proc/self/cwd/file.txt`
+
+- **Critical Bug**: Paths escaping namespace via `..` are now handled correctly
+  - `/proc/self/cwd/..` now correctly returns the parent directory as an absolute path
+
+### Added
+
+- Support for task-level namespace boundaries: `/proc/PID/task/TID/root` and `/proc/PID/task/TID/cwd`
+
+### Changed
+
+- Error reporting: Now correctly returns `PermissionDenied` instead of `NotFound` when lacking access to namespace paths
+
 ## [0.0.3] - 2025-12-11
 
 ### Fixed

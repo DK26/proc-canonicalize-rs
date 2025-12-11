@@ -28,7 +28,7 @@ assert_eq!(resolved, PathBuf::from("/"));  // Resolves to "/" - host root!
 
 ## The Fix
 
-This crate preserves the `/proc/PID/root` and `/proc/PID/cwd` prefixes:
+This crate preserves the `/proc/PID/root`, `/proc/PID/cwd`, and `/proc/PID/task/TID/root` prefixes:
 
 ```rust
 use proc_canonicalize::canonicalize;
