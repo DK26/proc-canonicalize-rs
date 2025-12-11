@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.3] - 2025-12-11
+
+### Fixed
+
+- **Security**: Indirect symlinks to `/proc` magic paths now correctly preserve namespace boundaries
+  - Previously, a symlink like `/tmp/container -> /proc/self/root` would resolve to `/` instead of `/proc/self/root`
+  - This could allow container escape if symlinks outside `/proc` pointed to namespace boundaries
+  - Now detects and handles symlink chains (up to 40 levels, matching kernel `MAXSYMLINKS`)
+
+### Changed
+
+- Documentation examples are now tested Rust code with assertions instead of text blocks
+- README examples updated to use proper `assert!` macros demonstrating expected behavior
+
 ## [0.0.2] - 2025-12-10
 
 ### Added
@@ -46,6 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Zero runtime dependencies (dunce is optional and Windows-only)
 - Comprehensive test suite for namespace boundary detection
 
-[Unreleased]: https://github.com/DK26/proc-canonicalize-rs/compare/v0.0.2...HEAD
+[Unreleased]: https://github.com/DK26/proc-canonicalize-rs/compare/v0.0.3...HEAD
+[0.0.3]: https://github.com/DK26/proc-canonicalize-rs/compare/v0.0.2...v0.0.3
 [0.0.2]: https://github.com/DK26/proc-canonicalize-rs/compare/v0.0.1...v0.0.2
 [0.0.1]: https://github.com/DK26/proc-canonicalize-rs/releases/tag/v0.0.1

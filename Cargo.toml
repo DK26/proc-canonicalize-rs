@@ -1,6 +1,6 @@
 [package]
 name = "proc-canonicalize"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2021"
 rust-version = "1.70.0"
 description = "Fix std::fs::canonicalize for /proc/PID/root and /proc/PID/cwd paths on Linux"

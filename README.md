@@ -108,7 +108,7 @@ Simplifies Windows extended-length paths by removing the `\\?\` prefix when poss
 
 ```toml
 [dependencies]
-proc-canonicalize = { version = "0.0.2", features = ["dunce"] }
+proc-canonicalize = { version = "0.0.3", features = ["dunce"] }
 ```
 
 **Behavior:**
@@ -127,7 +127,7 @@ This crate has **no dependencies** beyond the Rust standard library.
 
 ```toml
 [dependencies]
-proc-canonicalize = "0.0.2"
+proc-canonicalize = "0.0.3"
 ```
 
 ## License
