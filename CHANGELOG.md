@@ -7,10 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.4] - 2025-12-11
+
 ### Security
 
-- **Critical**: Fixed vulnerability where relative symlinks to `/proc` (e.g. `link -> ../proc/self/root`) could bypass namespace protection.
-- **Audit**: Added comprehensive security test suite covering double/triple indirection, symlink loops, and nested proc access.
+- **Critical**: Fixed vulnerability where relative symlinks to `/proc` (e.g. `link -> ../proc/self/root`) could bypass namespace protection by resolving through intermediate symlink targets.
+- **Critical**: Fixed vulnerability where `..` normalization before symlink detection could hide symlinks pointing to `/proc` magic paths.
+- Added comprehensive security test suite with 18 tests covering:
+  - Double and triple symlink indirection chains
+  - Symlink loops with proc references
+  - Relative symlinks with `..` components resolving to /proc
+  - Mixed real directories and symlink chains
+  - Innocent-looking symlink chains
 
 ### Fixed
 
@@ -20,14 +28,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Critical Bug**: Paths escaping namespace via `..` are now handled correctly
   - `/proc/self/cwd/..` now correctly returns the parent directory as an absolute path
+  - Detects when paths escape the namespace and returns absolute host path
+
+- Error reporting: Now correctly returns `PermissionDenied` instead of `NotFound` when lacking access to namespace paths
 
 ### Added
 
 - Support for task-level namespace boundaries: `/proc/PID/task/TID/root` and `/proc/PID/task/TID/cwd`
+- 15 comprehensive edge case regression tests covering:
+  - Namespace type symmetry (root vs cwd)
+  - Paths through namespaces (not just prefix alone)
+  - Namespace escape via `..`
+  - Symlink resolution within namespaces
+  - Idempotency invariant verification
 
 ### Changed
 
-- Error reporting: Now correctly returns `PermissionDenied` instead of `NotFound` when lacking access to namespace paths
+- Rewrote `detect_indirect_proc_magic_link()` to walk path components manually instead of normalizing first
+  - Prevents `..` normalization from hiding symlinks to magic paths
+  - Follows symlink chains iteratively with proper loop detection
+- Documented known limitations in AGENTS.md with clear threat model guidance
+- Added "Safe Use Cases" and "Unsafe Use Cases" sections for users
 
 ## [0.0.3] - 2025-12-11
 
@@ -82,7 +103,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Zero runtime dependencies (dunce is optional and Windows-only)
 - Comprehensive test suite for namespace boundary detection
 
-[Unreleased]: https://github.com/DK26/proc-canonicalize-rs/compare/v0.0.3...HEAD
+[Unreleased]: https://github.com/DK26/proc-canonicalize-rs/compare/v0.0.4...HEAD
+[0.0.4]: https://github.com/DK26/proc-canonicalize-rs/compare/v0.0.3...v0.0.4
 [0.0.3]: https://github.com/DK26/proc-canonicalize-rs/compare/v0.0.2...v0.0.3
 [0.0.2]: https://github.com/DK26/proc-canonicalize-rs/compare/v0.0.1...v0.0.2
 [0.0.1]: https://github.com/DK26/proc-canonicalize-rs/releases/tag/v0.0.1
