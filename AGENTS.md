@@ -47,9 +47,37 @@ To prevent namespace escapes and ensure security, the library follows a strict r
 
 ## Known Limitations
 
-- **Bind Mounts**: Paths involving bind mounts of `/proc` (e.g., `mount --bind /proc /mnt/proc`) are not detected as magic paths unless they explicitly use the `/proc` path. The library relies on path pattern matching (`/proc/PID/...`).
-- **Race Conditions (TOCTOU)**: While we check for symlinks before canonicalization, a malicious actor could theoretically swap a path component to a magic symlink *after* our check but *before* the underlying `std::fs::canonicalize` call. This is an inherent limitation of user-space path sanitization without open-at-style syscalls.
+This library provides best-effort namespace preservation suitable for **cooperative environments**. It is NOT a security boundary against adversarial filesystem manipulation.
+
+### Fundamental Limitations (require API/design changes to fix)
+
+- **TOCTOU After Symlink Scan**: The code detects symlinks into `/proc` before calling `std::fs::canonicalize`, but an attacker who controls the path can swap components to point into `/proc` after the scan and before canonicalization. Avoidable only with `openat`-style, race-free resolution.
+
+- **PID Reuse Race**: Paths like `/proc/<pid>/root/...` are resolved using the live proc entry. If the target process exits and a new process reuses that PID between your initial check and the canonicalize call, the namespace being consulted may silently change.
+
+- **Mount-Namespace Churn**: If the target PID switches mount namespaces mid-resolution (e.g., during container teardown/startup), the resolved path could straddle namespaces unexpectedly. There's no stabilization of the namespace view during canonicalization.
+
+- **Untrusted /proc Mount**: Logic assumes `/proc` is the real procfs. If an attacker controls a bind-mount or chroot that provides a fake `/proc`, the pattern match will treat it as authoritative and could misrepresent a hostile namespace boundary.
+
+### Detection Limitations (pattern-matching constraints)
+
+- **Bind Mounts of /proc**: Paths involving bind mounts (e.g., `mount --bind /proc /mnt/proc`) are not detected as magic paths unless they explicitly use the `/proc` path. The library relies on path pattern matching (`/proc/PID/...`).
+
 - **Non-Standard /proc Mounts**: If `/proc` is mounted at a different location (e.g., `/custom/proc`), it will not be detected.
+
+### Safe Use Cases
+
+- Host-side container monitoring (container cannot modify host filesystem)
+- Path canonicalization where users control input strings but not the filesystem
+- Best-effort namespace prefix preservation for logging/display
+
+### Unsafe Use Cases
+
+- Security decisions on paths under attacker-controlled directories
+- Validation on shared/remote filesystems (NFS, FUSE)
+- PID-based validation during process lifecycle transitions
+
+For adversarial environments, use `O_NOFOLLOW` + `openat()` chains and validate via `fstat()` on the opened file descriptor.
 
 ## Repository Layout
 
