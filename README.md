@@ -19,11 +19,11 @@ cat /proc/1234/root/etc/os-release  # Shows container's OS, not host's!
 However, `std::fs::canonicalize` resolves this magic symlink to `/`, **breaking security boundaries**:
 
 ```rust
-// BROKEN: std::fs::canonicalize loses the namespace prefix!
-std::fs::canonicalize("/proc/1234/root")?           // Returns "/" 
-std::fs::canonicalize("/proc/1234/root/etc/passwd")? // Returns "/etc/passwd"
+use std::path::PathBuf;
 
-// Security tools using this as a boundary are now checking against "/" (host root)!
+// BROKEN: std::fs::canonicalize loses the namespace prefix!
+let resolved = std::fs::canonicalize("/proc/self/root")?;
+assert_eq!(resolved, PathBuf::from("/"));  // Resolves to "/" - host root!
 ```
 
 ## The Fix
@@ -32,13 +32,25 @@ This crate preserves the `/proc/PID/root` and `/proc/PID/cwd` prefixes:
 
 ```rust
 use proc_canonicalize::canonicalize;
+use std::path::PathBuf;
 
 // FIXED: Namespace prefix is preserved!
-canonicalize("/proc/1234/root")?           // Returns "/proc/1234/root"
-canonicalize("/proc/1234/root/etc/passwd")? // Returns "/proc/1234/root/etc/passwd"
+let resolved = canonicalize("/proc/self/root")?;
+assert_eq!(resolved, PathBuf::from("/proc/self/root"));
 
-// Normal paths work exactly like std::fs::canonicalize:
-canonicalize("/home/user/../user/file.txt")? // Returns "/home/user/file.txt"
+// Paths through the boundary also preserve the prefix
+let resolved = canonicalize("/proc/self/root/etc")?;
+assert!(resolved.starts_with("/proc/self/root"));
+```
+
+Normal paths work exactly like `std::fs::canonicalize`:
+
+```rust
+use proc_canonicalize::canonicalize;
+
+let std_result = std::fs::canonicalize(".")?;
+let our_result = canonicalize(".")?;
+assert_eq!(std_result, our_result);
 ```
 
 ## Use Case
@@ -55,18 +67,16 @@ use proc_canonicalize::canonicalize;
 fn read_container_file(container_pid: u32, path: &str) -> std::io::Result<Vec<u8>> {
     let container_root = format!("/proc/{}/root", container_pid);
     let full_path = format!("{}{}", container_root, path);
-    
+
     // Canonicalize preserves the container boundary
     let canonical = canonicalize(&full_path)?;
-    
+
     // Security check: ensure path is still within container
-    if !canonical.starts_with(&container_root) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "path escapes container boundary"
-        ));
-    }
-    
+    assert!(
+        canonical.starts_with(&container_root),
+        "path escapes container boundary"
+    );
+
     std::fs::read(&canonical)
 }
 ```

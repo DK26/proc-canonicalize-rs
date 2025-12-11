@@ -56,12 +56,105 @@ These scripts:
 - Dependencies: Do not add runtime dependencies. If you believe one is strictly necessary, open an issue first.
 - **dunce feature usage (CRITICAL)**: Any code that uses `dunce::` functions MUST be guarded with `#[cfg(all(feature = "dunce", windows))]`. The dunce crate is a Windows-only target-conditional dependency.
 
+## Documentation Examples (CRITICAL)
+
+Documentation examples in `lib.rs` must be **testable and tested**. Claims about behavior must be backed by assertions, not just comments.
+
+**Note**: `README.md` examples are NOT tested by `cargo test --doc`, so they should be clean and readable without hidden test scaffolding. However, they should still use `assert!` macros to demonstrate expected behavior clearly.
+
+### Rules for `lib.rs` Examples
+
+1. **Use `assert!` macros**: When showing behavior, use assertions to prove the claim.
+2. **No `no_run` or `ignore`**: Examples must actually execute. These attributes are forbidden.
+3. **Platform-gating is allowed**: Use `#[cfg(target_os = "linux")]` to limit tests to relevant platforms.
+4. **Examples are tests**: Doc examples are compiled and run by `cargo test --doc`. They must pass.
+
+### Correct Pattern (`lib.rs`)
+
+```rust
+//! ```rust
+//! # #[cfg(target_os = "linux")]
+//! # fn main() -> std::io::Result<()> {
+//! use std::path::PathBuf;
+//!
+//! // Prove the claim with an assertion
+//! let resolved = proc_canonicalize::canonicalize("/proc/self/root")?;
+//! assert_eq!(resolved, PathBuf::from("/proc/self/root"));
+//! # Ok(())
+//! # }
+//! # #[cfg(not(target_os = "linux"))]
+//! # fn main() {}
+//! ```
+```
+
+### Correct Pattern (`README.md`)
+
+README examples are not tested, so keep them clean without hidden scaffolding:
+
+```rust
+use proc_canonicalize::canonicalize;
+use std::path::PathBuf;
+
+let resolved = canonicalize("/proc/self/root")?;
+assert_eq!(resolved, PathBuf::from("/proc/self/root"));
+```
+
+### Incorrect Patterns (do NOT use)
+
+```rust
+// BAD: Uses no_run - test never executes
+//! ```rust,no_run
+
+// BAD: Uses ignore - test is skipped entirely  
+//! ```rust,ignore
+
+// BAD: Comment-only claim with no assertion
+//! let result = canonicalize(path)?;  // Returns "/proc/self/root"
+```
+
+### Why This Matters
+
+- Doc examples are the first thing users see and copy
+- Assertions ensure examples stay correct as code evolves
+- `cargo test --doc` catches documentation rot automatically
+- Comments can lie; assertions cannot
+
 ## Tests & Quality Gates
 
 - Run `cargo test` on Linux (primary platform) and optionally Windows/macOS.
 - Coverage areas include: namespace boundary detection, PID validation, existing/non-existing paths, permission errors, symlink resolution within namespaces.
 - When changing behavior, add focused tests alongside the changed logic.
 - Keep tests deterministic and filesystem-safe.
+
+### Bug Fix Methodology (CRITICAL)
+
+When fixing bugs, you **MUST** follow this test-driven process to verify both the bug and the fix:
+
+1. **Write tests first**: Create tests that exercise the buggy behavior.
+2. **Verify tests FAIL**: Run the tests and confirm they fail, proving the bug exists.
+3. **Implement the fix**: Write the code to address the bug.
+4. **Verify tests PASS**: Run the tests again and confirm they now pass.
+5. **Run full CI**: Ensure no regressions in existing functionality.
+
+**Why this matters**: If you write tests and fixes simultaneously without step 2, you have no proof that:
+- The bug actually exists in the codebase
+- Your fix addresses the bug (tests might pass for the wrong reason)
+
+**Example workflow**:
+```bash
+# 1. Write tests for the bug
+# 2. Run tests - they should FAIL
+cargo test my_new_bug_tests  # Expect failures
+
+# 3. Implement the fix
+# 4. Run tests again - they should PASS
+cargo test my_new_bug_tests  # Expect success
+
+# 5. Full CI
+bash ci-local.sh
+```
+
+**Temporary disable technique**: If you accidentally write the fix first, you can still verify by temporarily commenting out the fix, running the tests (should fail), then re-enabling the fix (should pass).
 
 ### Testing on Linux (Required)
 
