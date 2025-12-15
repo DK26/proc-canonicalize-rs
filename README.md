@@ -58,14 +58,10 @@ fn read_container_file(container_pid: u32, path: &str) -> std::io::Result<Vec<u8
     let container_root = format!("/proc/{}/root", container_pid);
     let full_path = format!("{}{}", container_root, path);
 
-    // Canonicalize preserves the container boundary
     let canonical = canonicalize(&full_path)?;
 
-    // Security check: ensure path is still within container
-    assert!(
-        canonical.starts_with(&container_root),
-        "path escapes container boundary"
-    );
+    // Security: canonical path must stay inside container_root
+    assert!(canonical.starts_with(&container_root));
 
     std::fs::read(&canonical)
 }
@@ -98,7 +94,7 @@ Simplifies Windows extended-length paths by removing the `\\?\` prefix when poss
 
 ```toml
 [dependencies]
-proc-canonicalize = { version = "0.0.4", features = ["dunce"] }
+proc-canonicalize = { version = "0.1", features = ["dunce"] }
 ```
 
 **Behavior:**
@@ -117,7 +113,7 @@ This crate has **no dependencies** beyond the Rust standard library.
 
 ```toml
 [dependencies]
-proc-canonicalize = "0.0.4"
+proc-canonicalize = "0.1"
 ```
 
 ## License
