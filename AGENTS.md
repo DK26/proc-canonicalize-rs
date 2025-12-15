@@ -140,6 +140,24 @@ assert_eq!(our_result, PathBuf::from("/proc/self/root"));  // we fix it
 2. **No `no_run` or `ignore`**: Examples must actually execute. These attributes are forbidden.
 3. **Platform-gating is allowed**: Use `#[cfg(target_os = "linux")]` to limit tests to relevant platforms.
 4. **Examples are tests**: Doc examples are compiled and run by `cargo test --doc`. They must pass.
+5. **No failure messages in doc assertions**: In documentation, the assertion IS the teaching moment. Failure messages are noise.
+
+**BAD** (in documentation):
+```rust
+assert!(canonical.starts_with(&container_root), "path escapes container boundary");
+```
+
+**GOOD** (in documentation):
+```rust
+// Security: canonical path must stay inside container_root
+assert!(canonical.starts_with(&container_root));
+```
+
+**Note**: In unit tests (not documentation), failure messages ARE helpful for debugging CI failures:
+```rust
+// In unit tests, failure messages help diagnose issues quickly
+assert!(result.starts_with("/proc/self/root"), "expected /proc prefix, got: {:?}", result);
+```
 
 ### Correct Pattern (`lib.rs`)
 
