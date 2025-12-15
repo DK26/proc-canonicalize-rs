@@ -113,6 +113,27 @@ Documentation examples in `lib.rs` must be **testable and tested**. Claims about
 
 **Note**: `README.md` examples are NOT tested by `cargo test --doc`, so they should be clean and readable without hidden test scaffolding. However, they should still use `assert!` macros to demonstrate expected behavior clearly.
 
+### Examples Must Demonstrate Unique Value
+
+Don't waste reader time showing that "normal behavior works like std". Examples should show what makes THIS crate different.
+
+**BAD** (adds no value):
+```rust
+// Normal paths work like std::fs::canonicalize
+let our_result = canonicalize(".")?;
+let std_result = std::fs::canonicalize(".")?;
+assert_eq!(our_result, std_result);
+```
+
+**GOOD** (shows why this crate exists):
+```rust
+// We preserve namespace boundaries that std breaks
+let our_result = canonicalize("/proc/self/root")?;
+let std_result = std::fs::canonicalize("/proc/self/root")?;
+assert_eq!(std_result, PathBuf::from("/"));  // std breaks it
+assert_eq!(our_result, PathBuf::from("/proc/self/root"));  // we fix it
+```
+
 ### Rules for `lib.rs` Examples
 
 1. **Use `assert!` macros**: When showing behavior, use assertions to prove the claim.
