@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2025-12-15
+
+### Changed
+
+- **Maturity**: Promoted from alpha (0.0.x) to stable (0.1.0) release
+- **Documentation**: Improved examples to demonstrate unique value instead of redundant comparisons
+- **Testing**: Refactored all unit tests to be self-documenting with descriptive names and variable names that tell the story
+- **Quality**: Enhanced test coverage and documentation quality for production readiness
+
 ## [0.0.4] - 2025-12-11
 
 ### Security
