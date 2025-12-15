@@ -261,6 +261,87 @@ bash ci-local.sh
 
 **Temporary disable technique**: If you accidentally write the fix first, you can still verify by temporarily commenting out the fix, running the tests (should fail), then re-enabling the fix (should pass).
 
+### Self-Documenting Tests (CRITICAL)
+
+Tests should be **self-explanatory through code**, not comments. The code itself must clearly show how the API should or should not be used.
+
+#### Principles
+
+1. **Function names read like sentences**: Use descriptive names that explain what's being tested.
+   ```rust
+   // GOOD: Name explains the behavior
+   fn proc_self_root_preserved_not_resolved_to_slash() { ... }
+   fn symlink_to_proc_self_root_preserves_namespace() { ... }
+   
+   // BAD: Generic or unclear names
+   fn test_case_1() { ... }
+   fn test_canonicalize() { ... }
+   ```
+
+2. **Variable names explain intent**: Names should tell the story.
+   ```rust
+   // GOOD: Variables explain the scenario
+   let container_pid = std::process::id();
+   let container_root = format!("/proc/{}/root", container_pid);
+   let file_inside_container = format!("{}/etc", container_root);
+   let is_inside_container = canonical.starts_with(&container_root);
+   
+   // BAD: Generic names require mental mapping
+   let p = std::process::id();
+   let r = format!("/proc/{}/root", p);
+   let f = format!("{}/etc", r);
+   ```
+
+3. **Tests are copy-able usage examples**: A user should be able to copy test code directly.
+   ```rust
+   #[test]
+   fn reading_container_file_from_host() {
+       let container_pid = std::process::id();
+       let container_root = format!("/proc/{}/root", container_pid);
+       let file_inside_container = format!("{}/etc", container_root);
+   
+       let canonical_path = canonicalize(file_inside_container).unwrap();
+   
+       assert!(canonical_path.starts_with(&container_root));
+   }
+   ```
+
+4. **Show contrast with std when relevant**: Make the difference obvious.
+   ```rust
+   let our_result = canonicalize(path).unwrap();
+   let std_result = std::fs::canonicalize(path).unwrap();
+   
+   assert_eq!(std_result, PathBuf::from("/"));           // std breaks it
+   assert_eq!(our_result, PathBuf::from("/proc/self/root")); // we fix it
+   ```
+
+5. **Minimal comments**: If you need a comment to explain what code does, rename the variables instead.
+   ```rust
+   // BAD: Comment explains what code should say
+   let r = canonicalize(p)?;  // Returns the preserved namespace path
+   
+   // GOOD: Code speaks for itself
+   let preserved_namespace_path = canonicalize(container_file)?;
+   ```
+
+6. **Section headers organize test modules**: Group related tests under clear headers.
+   ```rust
+   // ==========================================================================
+   // USAGE EXAMPLES: How to use this crate for container monitoring
+   // ==========================================================================
+   
+   // ==========================================================================
+   // ERROR CASES: What happens with invalid input
+   // ==========================================================================
+   ```
+
+#### Why This Matters
+
+- Tests are documentation that can't lie (they compile and run)
+- New contributors learn the API by reading tests
+- Self-documenting tests don't rot when behavior changes (comments do)
+- Copy-able examples reduce user friction
+
 ### Testing on Linux (Required)
 
 Most functionality is Linux-specific. Test primarily on Linux or WSL:

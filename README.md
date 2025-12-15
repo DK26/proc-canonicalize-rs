@@ -43,16 +43,6 @@ let resolved = canonicalize("/proc/self/root/etc")?;
 assert!(resolved.starts_with("/proc/self/root"));
 ```
 
-Normal paths work exactly like `std::fs::canonicalize`:
-
-```rust
-use proc_canonicalize::canonicalize;
-
-let std_result = std::fs::canonicalize(".")?;
-let our_result = canonicalize(".")?;
-assert_eq!(std_result, our_result);
-```
-
 ## Use Case
 
 Container monitoring and security tools that need to:

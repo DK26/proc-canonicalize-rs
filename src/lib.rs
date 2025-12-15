@@ -46,23 +46,6 @@
 //! # fn main() {}
 //! ```
 //!
-//! For all other paths, behavior is identical to `std::fs::canonicalize`:
-//!
-//! ```rust
-//! # fn main() -> std::io::Result<()> {
-//! // Normal paths behave exactly like std::fs::canonicalize
-//! let std_result = std::fs::canonicalize(".")?;
-//! let our_result = proc_canonicalize::canonicalize(".")?;
-//! // Note: On Windows with the `dunce` feature, our result may differ
-//! // (simplified path without \\?\ prefix). See unit tests for full coverage.
-//! #[cfg(not(windows))]
-//! assert_eq!(std_result, our_result);
-//! #[cfg(windows)]
-//! let _ = (std_result, our_result); // Use variables to avoid warnings
-//! # Ok(())
-//! # }
-//! ```
-//!
 //! ## Platform Support
 //!
 //! - **Linux**: Full functionality - preserves `/proc/PID/root` and `/proc/PID/cwd`
@@ -423,8 +406,16 @@ mod tests {
     mod linux {
         use super::*;
 
+        // ==========================================================================
+        // NAMESPACE BOUNDARY DETECTION (find_namespace_boundary)
+        // These tests verify the lexical pattern matching that identifies
+        // /proc/PID/root and /proc/PID/cwd as namespace boundaries.
+        // ==========================================================================
+
         #[test]
         fn test_find_namespace_boundary_proc_pid_root() {
+            // Standard pattern: /proc/<numeric_pid>/root
+            // Used by container runtimes to access container filesystems from host
             let (prefix, remainder) =
                 find_namespace_boundary(Path::new("/proc/1234/root/etc/passwd")).unwrap();
             assert_eq!(prefix, PathBuf::from("/proc/1234/root"));
@@ -433,6 +424,8 @@ mod tests {
 
         #[test]
         fn test_find_namespace_boundary_proc_pid_cwd() {
+            // Pattern: /proc/<pid>/cwd - the process's current working directory
+            // Less common but equally needs protection
             let (prefix, remainder) =
                 find_namespace_boundary(Path::new("/proc/5678/cwd/some/file.txt")).unwrap();
             assert_eq!(prefix, PathBuf::from("/proc/5678/cwd"));
@@ -441,6 +434,8 @@ mod tests {
 
         #[test]
         fn test_find_namespace_boundary_proc_self_root() {
+            // /proc/self/root - own process's root, resolves to "/" on host
+            // Common in self-referential container tooling
             let (prefix, remainder) =
                 find_namespace_boundary(Path::new("/proc/self/root/etc/passwd")).unwrap();
             assert_eq!(prefix, PathBuf::from("/proc/self/root"));
@@ -449,6 +444,7 @@ mod tests {
 
         #[test]
         fn test_find_namespace_boundary_proc_thread_self_root() {
+            // /proc/thread-self/root - per-thread namespace, less common
             let (prefix, remainder) =
                 find_namespace_boundary(Path::new("/proc/thread-self/root/app/config")).unwrap();
             assert_eq!(prefix, PathBuf::from("/proc/thread-self/root"));
@@ -456,7 +452,8 @@ mod tests {
         }
 
         #[test]
-        fn test_find_namespace_boundary_just_prefix() {
+        fn test_find_namespace_boundary_just_prefix_no_remainder() {
+            // Accessing just the magic path itself, no subpath
             let (prefix, remainder) =
                 find_namespace_boundary(Path::new("/proc/1234/root")).unwrap();
             assert_eq!(prefix, PathBuf::from("/proc/1234/root"));
@@ -464,786 +461,561 @@ mod tests {
         }
 
         #[test]
-        fn test_find_namespace_boundary_normal_path() {
+        fn test_find_namespace_boundary_normal_path_returns_none() {
+            // Regular paths should NOT match - no namespace treatment needed
             assert!(find_namespace_boundary(Path::new("/home/user/file.txt")).is_none());
         }
 
         #[test]
-        fn test_find_namespace_boundary_proc_but_not_namespace() {
-            // /proc/1234/status is NOT a namespace boundary
+        fn test_find_namespace_boundary_proc_other_files_not_namespace() {
+            // SECURITY: /proc/PID/status, /proc/PID/exe, /proc/PID/fd are NOT namespaces
+            // Only "root" and "cwd" are magic symlinks that cross namespace boundaries
             assert!(find_namespace_boundary(Path::new("/proc/1234/status")).is_none());
             assert!(find_namespace_boundary(Path::new("/proc/1234/exe")).is_none());
             assert!(find_namespace_boundary(Path::new("/proc/1234/fd/0")).is_none());
         }
 
         #[test]
-        fn test_find_namespace_boundary_relative_path() {
+        fn test_find_namespace_boundary_relative_path_rejected() {
+            // SECURITY: Only absolute paths can be namespace boundaries
+            // "proc/1234/root" without leading "/" is relative, not /proc
             assert!(find_namespace_boundary(Path::new("proc/1234/root")).is_none());
         }
 
         #[test]
-        fn test_find_namespace_boundary_invalid_pid() {
+        fn test_find_namespace_boundary_invalid_pid_rejected() {
+            // SECURITY: PID must be numeric, "self", or "thread-self"
+            // Arbitrary strings like "abc" must not match
             assert!(find_namespace_boundary(Path::new("/proc/abc/root")).is_none());
             assert!(find_namespace_boundary(Path::new("/proc/123abc/root")).is_none());
             assert!(find_namespace_boundary(Path::new("/proc//root")).is_none());
         }
 
-        #[test]
-        fn test_canonicalize_proc_self_root() {
-            // /proc/self/root should return itself, not "/"
-            let result = canonicalize("/proc/self/root").expect("should succeed");
-            assert_eq!(result, PathBuf::from("/proc/self/root"));
+        // ==========================================================================
+        // USAGE EXAMPLES: How to use this crate for container monitoring
+        // ==========================================================================
 
-            // Contrast with std::fs::canonicalize which returns "/"
-            let std_result = std::fs::canonicalize("/proc/self/root").expect("should succeed");
+        #[test]
+        fn reading_container_file_from_host() {
+            // Real-world pattern: Host process reads a container's /etc/hostname
+            let container_pid = std::process::id(); // In reality, this would be a container's PID
+            let container_root = format!("/proc/{}/root", container_pid);
+            let file_inside_container = format!("{}/etc", container_root);
+
+            let canonical_path = canonicalize(file_inside_container).unwrap();
+
+            // The path STAYS inside the container namespace
+            assert!(canonical_path.starts_with(&container_root));
+        }
+
+        #[test]
+        fn validating_path_stays_in_container() {
+            // Security pattern: Verify a user-provided path doesn't escape container
+            let container_pid = std::process::id();
+            let container_root = format!("/proc/{}/root", container_pid);
+            let user_requested_file = format!("{}/etc/passwd", container_root);
+
+            let canonical = canonicalize(user_requested_file).unwrap();
+
+            // Security check: canonical path must start with container_root
+            let is_inside_container = canonical.starts_with(&container_root);
+            assert!(is_inside_container);
+        }
+
+        #[test]
+        fn proc_self_root_preserved_not_resolved_to_slash() {
+            let path = "/proc/self/root";
+
+            let our_result = canonicalize(path).unwrap();
+            let std_result = std::fs::canonicalize(path).unwrap();
+
+            // std breaks it: returns "/"
             assert_eq!(std_result, PathBuf::from("/"));
 
-            // They should be different!
-            assert_ne!(result, std_result);
+            // we fix it: preserves the namespace
+            assert_eq!(our_result, PathBuf::from("/proc/self/root"));
         }
 
         #[test]
-        fn test_canonicalize_proc_self_root_subpath() {
-            // Test with a subpath that exists
-            let result = canonicalize("/proc/self/root/etc").expect("should succeed");
-            assert!(
-                result.starts_with("/proc/self/root"),
-                "should preserve /proc/self/root prefix, got: {:?}",
-                result
-            );
-        }
+        fn proc_self_cwd_preserved() {
+            let path = "/proc/self/cwd";
 
-        #[test]
-        fn test_canonicalize_normal_path() {
-            // Normal paths should behave like std::fs::canonicalize
-            let tmp = std::env::temp_dir();
-            let our_result = canonicalize(&tmp).expect("should succeed");
-            let std_result = std::fs::canonicalize(&tmp).expect("should succeed");
-            assert_eq!(our_result, std_result);
-        }
+            let result = canonicalize(path).unwrap();
 
-        #[test]
-        fn test_canonicalize_proc_pid_root() {
-            use std::process;
-            let pid = process::id();
-            let proc_pid_root = format!("/proc/{}/root", pid);
-
-            let result = canonicalize(&proc_pid_root).expect("should succeed");
-            assert_eq!(result, PathBuf::from(&proc_pid_root));
-
-            // std would return "/"
-            let std_result = std::fs::canonicalize(&proc_pid_root).expect("should succeed");
-            assert_eq!(std_result, PathBuf::from("/"));
-        }
-
-        #[test]
-        fn test_canonicalize_proc_self_cwd() {
-            // /proc/self/cwd should also be preserved
-            let result = canonicalize("/proc/self/cwd").expect("should succeed");
             assert_eq!(result, PathBuf::from("/proc/self/cwd"));
         }
 
         #[test]
-        fn test_canonicalize_nonexistent_file_under_namespace() {
-            // Non-existent file under valid namespace should return NotFound error
-            let result = canonicalize("/proc/self/root/this_file_definitely_does_not_exist_12345");
+        fn explicit_pid_root_preserved() {
+            let my_pid = std::process::id();
+            let path = format!("/proc/{}/root", my_pid);
+
+            let our_result = canonicalize(&path).unwrap();
+            let std_result = std::fs::canonicalize(&path).unwrap();
+
+            assert_eq!(std_result, PathBuf::from("/"));
+            assert_eq!(our_result, PathBuf::from(&path));
+        }
+
+        #[test]
+        fn subpath_through_namespace_preserves_prefix() {
+            let path = "/proc/self/root/etc";
+
+            let result = canonicalize(path).unwrap();
+
+            assert!(result.starts_with("/proc/self/root"));
+            assert!(result.ends_with("etc"));
+        }
+
+        #[test]
+        fn normal_paths_behave_like_std() {
+            let path = std::env::temp_dir();
+
+            let our_result = canonicalize(&path).unwrap();
+            let std_result = std::fs::canonicalize(&path).unwrap();
+
+            assert_eq!(our_result, std_result);
+        }
+
+        // ==========================================================================
+        // ERROR CASES: What happens with invalid input
+        // ==========================================================================
+
+        #[test]
+        fn nonexistent_file_returns_not_found() {
+            let path = "/proc/self/root/this_file_does_not_exist_12345";
+
+            let result = canonicalize(path);
+
             assert!(result.is_err());
-            let err = result.unwrap_err();
-            assert_eq!(err.kind(), io::ErrorKind::NotFound);
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
         }
 
         #[test]
-        fn test_canonicalize_nonexistent_pid() {
-            // Very high PID that almost certainly doesn't exist
-            let result = canonicalize("/proc/4294967295/root");
+        fn nonexistent_pid_returns_not_found() {
+            let path = "/proc/4294967295/root"; // PID that doesn't exist
+
+            let result = canonicalize(path);
+
             assert!(result.is_err());
-            let err = result.unwrap_err();
-            assert_eq!(err.kind(), io::ErrorKind::NotFound);
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
         }
 
         #[test]
-        fn test_canonicalize_with_dotdot_normalization() {
-            // Path with .. that should be normalized but stay within namespace
-            let result = canonicalize("/proc/self/root/etc/../etc/passwd");
-            // This should either succeed (if /etc/passwd exists) or fail with NotFound
-            // But if it succeeds, it must preserve the namespace prefix
-            if let Ok(path) = result {
-                assert!(
-                    path.starts_with("/proc/self/root"),
-                    "should preserve namespace prefix, got: {:?}",
-                    path
-                );
+        fn empty_path_returns_error() {
+            let result = canonicalize("");
+
+            assert!(result.is_err());
+        }
+
+        // ==========================================================================
+        // PATH NORMALIZATION: Dots and parent references
+        // ==========================================================================
+
+        #[test]
+        fn dotdot_stays_inside_root_namespace() {
+            let path = "/proc/self/root/tmp/../etc";
+
+            let result = canonicalize(path);
+
+            if let Ok(canonical) = result {
+                assert!(canonical.starts_with("/proc/self/root"));
             }
         }
 
         #[test]
-        fn test_canonicalize_with_dotdot_at_boundary() {
-            // Try to escape with .. - should still be contained
-            // /proc/self/root/../root/etc should resolve within namespace
-            let result = canonicalize("/proc/self/root/tmp/../etc");
-            if let Ok(path) = result {
-                assert!(
-                    path.starts_with("/proc/self/root"),
-                    "should preserve namespace prefix even with .., got: {:?}",
-                    path
-                );
+        fn dot_is_normalized_out() {
+            let path = "/proc/self/root/./etc";
+
+            let result = canonicalize(path);
+
+            if let Ok(canonical) = result {
+                assert!(canonical.starts_with("/proc/self/root"));
+                assert!(!canonical.to_string_lossy().contains("/./"));
             }
         }
 
         #[test]
-        fn test_canonicalize_deep_nested_path() {
-            // Deep nested path under namespace
-            let result = canonicalize("/proc/self/root/usr/share/doc");
-            if let Ok(path) = result {
-                assert!(
-                    path.starts_with("/proc/self/root"),
-                    "should preserve namespace prefix for deep paths, got: {:?}",
-                    path
-                );
+        fn deep_path_preserves_namespace() {
+            let path = "/proc/self/root/usr/share/doc";
+
+            let result = canonicalize(path);
+
+            if let Ok(canonical) = result {
+                assert!(canonical.starts_with("/proc/self/root"));
             }
         }
 
         #[test]
-        fn test_canonicalize_trailing_slash() {
-            // Trailing slash should still work
-            let result = canonicalize("/proc/self/root/");
-            // Note: std::fs::canonicalize typically strips trailing slashes
-            if let Ok(path) = result {
-                assert!(
-                    path.starts_with("/proc/self/root"),
-                    "should handle trailing slash, got: {:?}",
-                    path
-                );
+        fn trailing_slash_works() {
+            let with_slash = canonicalize("/proc/self/root/");
+            let without_slash = canonicalize("/proc/self/root");
+
+            if let (Ok(a), Ok(b)) = (with_slash, without_slash) {
+                assert!(a.starts_with("/proc/self/root"));
+                assert!(b.starts_with("/proc/self/root"));
             }
         }
 
         #[test]
-        fn test_canonicalize_thread_self() {
-            // /proc/thread-self/root should also work
-            let result = canonicalize("/proc/thread-self/root");
-            if let Ok(path) = result {
-                assert_eq!(path, PathBuf::from("/proc/thread-self/root"));
-            }
-            // Note: thread-self might not exist on all systems, so we allow failure
-        }
+        fn thread_self_root_preserved() {
+            let path = "/proc/thread-self/root";
 
-        #[test]
-        fn test_canonicalize_symlink_resolution_within_namespace() {
-            // /etc/mtab is often a symlink - verify symlinks are resolved
-            // but namespace prefix is preserved
-            let result = canonicalize("/proc/self/root/etc/mtab");
-            if let Ok(path) = result {
-                assert!(
-                    path.starts_with("/proc/self/root"),
-                    "symlink resolution should preserve namespace, got: {:?}",
-                    path
-                );
+            if let Ok(result) = canonicalize(path) {
+                assert_eq!(result, PathBuf::from("/proc/thread-self/root"));
             }
         }
 
+        // ==========================================================================
+        // EDGE CASES FOR BOUNDARY DETECTION
+        // ==========================================================================
+
         #[test]
-        fn test_find_namespace_boundary_with_trailing_slash() {
-            // Path with trailing slash
-            let result = find_namespace_boundary(Path::new("/proc/1234/root/"));
-            assert!(result.is_some());
-            let (prefix, _remainder) = result.unwrap();
+        fn boundary_detection_handles_trailing_slash() {
+            let (prefix, _remainder) =
+                find_namespace_boundary(Path::new("/proc/1234/root/")).unwrap();
             assert_eq!(prefix, PathBuf::from("/proc/1234/root"));
-            // Remainder might be empty or contain just a component depending on how trailing slash is parsed
         }
 
         #[test]
-        fn test_find_namespace_boundary_with_dots() {
-            // Path with . and .. components - these get normalized by Path
-            let result = find_namespace_boundary(Path::new("/proc/1234/root/./etc/../etc"));
-            assert!(result.is_some());
-            let (prefix, _remainder) = result.unwrap();
+        fn boundary_detection_handles_dot_components() {
+            let (prefix, _remainder) =
+                find_namespace_boundary(Path::new("/proc/1234/root/./etc/../etc")).unwrap();
             assert_eq!(prefix, PathBuf::from("/proc/1234/root"));
-            // Remainder will contain the unnormalized path components
         }
 
-        #[test]
-        fn test_canonicalize_permission_denied() {
-            // Try to access another process's namespace without permission
-            // PID 1 is usually init and may have restricted access
-            let result = canonicalize("/proc/1/root/etc/shadow");
-            // This should either succeed or fail with PermissionDenied or NotFound
-            // depending on system configuration
-            if let Err(e) = result {
-                assert!(
-                    e.kind() == io::ErrorKind::PermissionDenied
-                        || e.kind() == io::ErrorKind::NotFound,
-                    "expected PermissionDenied or NotFound, got: {:?}",
-                    e.kind()
-                );
-            }
-        }
+        // ==========================================================================
+        // ACCESSING OTHER PROCESSES (requires permissions)
+        // ==========================================================================
 
         #[test]
-        fn test_canonicalize_pid_1_root() {
-            // PID 1 is always init/systemd - a real external process
-            // This is the realistic scenario: accessing another process's namespace
-            let result = canonicalize("/proc/1/root");
+        fn pid_1_root_requires_permission_or_preserves_prefix() {
+            let path = "/proc/1/root";
 
-            match result {
-                Ok(path) => {
-                    // If we have permission, the prefix MUST be preserved
-                    assert_eq!(
-                        path,
-                        PathBuf::from("/proc/1/root"),
-                        "must preserve /proc/1/root prefix"
-                    );
-
-                    // Verify std::fs::canonicalize would return "/" (the problem we're fixing)
-                    let std_result =
-                        std::fs::canonicalize("/proc/1/root").expect("std should also succeed");
-                    assert_eq!(std_result, PathBuf::from("/"), "std resolves to /");
+            match canonicalize(path) {
+                Ok(result) => {
+                    // If accessible, prefix must be preserved
+                    assert_eq!(result, PathBuf::from("/proc/1/root"));
+                    // And std would have broken it
+                    assert_eq!(std::fs::canonicalize(path).unwrap(), PathBuf::from("/"));
                 }
                 Err(e) => {
-                    // Permission denied is acceptable - we're accessing another process
-                    assert!(
-                        e.kind() == io::ErrorKind::PermissionDenied
-                            || e.kind() == io::ErrorKind::NotFound,
-                        "expected PermissionDenied or NotFound, got: {:?}",
-                        e.kind()
-                    );
+                    // Permission denied or not found is acceptable
+                    assert!(matches!(
+                        e.kind(),
+                        io::ErrorKind::PermissionDenied | io::ErrorKind::NotFound
+                    ));
                 }
             }
         }
 
         #[test]
-        fn test_canonicalize_pid_1_root_subpath() {
-            // Access a file through PID 1's namespace - realistic container scenario
-            let result = canonicalize("/proc/1/root/etc/hostname");
+        fn pid_1_subpath_preserves_prefix_when_accessible() {
+            let path = "/proc/1/root/etc/hostname";
 
-            match result {
-                Ok(path) => {
-                    // Path MUST preserve the namespace boundary
+            match canonicalize(path) {
+                Ok(result) => {
                     assert!(
-                        path.starts_with("/proc/1/root"),
+                        result.starts_with("/proc/1/root"),
                         "must preserve /proc/1/root prefix, got: {:?}",
-                        path
+                        result
                     );
                 }
                 Err(e) => {
-                    // Permission denied or file not found is acceptable
-                    assert!(
-                        e.kind() == io::ErrorKind::PermissionDenied
-                            || e.kind() == io::ErrorKind::NotFound,
-                        "expected PermissionDenied or NotFound, got: {:?}",
-                        e.kind()
-                    );
+                    assert!(matches!(
+                        e.kind(),
+                        io::ErrorKind::PermissionDenied | io::ErrorKind::NotFound
+                    ));
                 }
             }
         }
 
         #[test]
-        fn test_canonicalize_pid_1_cwd() {
-            // Test /proc/1/cwd - the working directory of init
-            let result = canonicalize("/proc/1/cwd");
+        fn pid_1_cwd_preserves_prefix_when_accessible() {
+            let path = "/proc/1/cwd";
 
-            match result {
-                Ok(path) => {
-                    assert_eq!(
-                        path,
-                        PathBuf::from("/proc/1/cwd"),
-                        "must preserve /proc/1/cwd"
-                    );
-                }
+            match canonicalize(path) {
+                Ok(result) => assert_eq!(result, PathBuf::from("/proc/1/cwd")),
                 Err(e) => {
-                    assert!(
-                        e.kind() == io::ErrorKind::PermissionDenied
-                            || e.kind() == io::ErrorKind::NotFound,
-                        "expected PermissionDenied or NotFound, got: {:?}",
-                        e.kind()
-                    );
+                    assert!(matches!(
+                        e.kind(),
+                        io::ErrorKind::PermissionDenied | io::ErrorKind::NotFound
+                    ));
                 }
             }
         }
 
         #[test]
-        fn test_self_vs_pid_equivalence() {
-            // /proc/self/root and /proc/{our_pid}/root should behave the same
-            use std::process;
-            let pid = process::id();
+        fn self_and_explicit_pid_both_work() {
+            let my_pid = std::process::id();
 
-            let self_result = canonicalize("/proc/self/root").expect("self should work");
-            let pid_result = canonicalize(format!("/proc/{}/root", pid)).expect("pid should work");
+            let self_result = canonicalize("/proc/self/root").unwrap();
+            let pid_result = canonicalize(format!("/proc/{}/root", my_pid)).unwrap();
 
-            // Both should preserve their respective prefixes
             assert_eq!(self_result, PathBuf::from("/proc/self/root"));
-            assert_eq!(pid_result, PathBuf::from(format!("/proc/{}/root", pid)));
+            assert_eq!(pid_result, PathBuf::from(format!("/proc/{}/root", my_pid)));
         }
 
-        /// Tests for indirect symlinks pointing to /proc/PID/root magic paths.
-        ///
-        /// These test the security vulnerability where a symlink outside /proc
-        /// points to a /proc magic path, bypassing the lexical prefix check.
+        // ==========================================================================
+        // INDIRECT SYMLINKS: Symlinks outside /proc pointing TO /proc magic paths
+        // ==========================================================================
+
         mod indirect_symlink_tests {
             use super::*;
             use std::os::unix::fs::symlink;
 
             #[test]
-            fn test_indirect_symlink_to_proc_self_root() {
-                // Create a symlink outside /proc that points to /proc/self/root
-                let temp = tempfile::tempdir().expect("failed to create temp dir");
-                let link_path = temp.path().join("link_to_proc");
+            fn symlink_to_proc_self_root_preserves_namespace() {
+                let temp = tempfile::tempdir().unwrap();
+                let link = temp.path().join("link");
 
-                // Create symlink: link_to_proc -> /proc/self/root
-                symlink("/proc/self/root", &link_path).expect("failed to create symlink");
+                symlink("/proc/self/root", &link).unwrap();
 
-                let result = canonicalize(&link_path).expect("canonicalize should succeed");
+                let result = canonicalize(&link).unwrap();
 
-                // CRITICAL: Must NOT be "/" - that would be the security bypass
-                assert_ne!(
-                    result,
-                    PathBuf::from("/"),
-                    "SECURITY BUG: Indirect symlink to /proc/self/root resolved to /"
-                );
-
-                // Should preserve the /proc/self/root prefix
-                assert!(
-                    result.starts_with("/proc/self/root"),
-                    "Expected /proc/self/root prefix, got: {:?}",
-                    result
-                );
+                assert_ne!(result, PathBuf::from("/")); // NOT the broken behavior
+                assert_eq!(result, PathBuf::from("/proc/self/root"));
             }
 
             #[test]
-            fn test_indirect_symlink_with_suffix() {
-                // Create a symlink and then access a path through it
-                let temp = tempfile::tempdir().expect("failed to create temp dir");
-                let link_path = temp.path().join("container");
+            fn symlink_then_subpath_preserves_namespace() {
+                let temp = tempfile::tempdir().unwrap();
+                let link = temp.path().join("container");
 
-                // Create symlink: container -> /proc/self/root
-                symlink("/proc/self/root", &link_path).expect("failed to create symlink");
+                symlink("/proc/self/root", &link).unwrap();
 
-                // Canonicalize a path THROUGH the symlink
-                let result =
-                    canonicalize(link_path.join("etc")).expect("canonicalize should succeed");
+                let result = canonicalize(link.join("etc")).unwrap();
 
-                // Should be /proc/self/root/etc, NOT /etc
-                assert!(
-                    result.starts_with("/proc/self/root"),
-                    "Expected /proc/self/root prefix, got: {:?}",
-                    result
-                );
+                assert!(result.starts_with("/proc/self/root"));
             }
 
             #[test]
-            fn test_chained_symlinks_to_proc() {
-                // Create chain: link1 -> link2 -> /proc/self/root
-                let temp = tempfile::tempdir().expect("failed to create temp dir");
-
-                let link2 = temp.path().join("link2");
+            fn chained_symlinks_all_followed() {
+                let temp = tempfile::tempdir().unwrap();
                 let link1 = temp.path().join("link1");
+                let link2 = temp.path().join("link2");
 
-                symlink("/proc/self/root", &link2).expect("failed to create link2");
-                symlink(&link2, &link1).expect("failed to create link1");
+                symlink("/proc/self/root", &link2).unwrap();
+                symlink(&link2, &link1).unwrap();
 
-                let result = canonicalize(&link1).expect("canonicalize should succeed");
+                let result = canonicalize(&link1).unwrap();
 
-                // Should preserve /proc prefix even through chain
-                assert!(
-                    result.starts_with("/proc/self/root"),
-                    "Chained symlinks should preserve /proc prefix, got: {:?}",
-                    result
-                );
+                assert_eq!(result, PathBuf::from("/proc/self/root"));
             }
 
             #[test]
-            fn test_indirect_symlink_to_proc_pid_root() {
-                // Test with actual PID (our own process)
-                use std::process;
-                let pid = process::id();
-                let proc_path = format!("/proc/{}/root", pid);
+            fn symlink_to_explicit_pid_root_preserved() {
+                let my_pid = std::process::id();
+                let target = format!("/proc/{}/root", my_pid);
+                let temp = tempfile::tempdir().unwrap();
+                let link = temp.path().join("link");
 
-                let temp = tempfile::tempdir().expect("failed to create temp dir");
-                let link_path = temp.path().join("pid_link");
+                symlink(&target, &link).unwrap();
 
-                symlink(proc_path.as_str(), &link_path).expect("failed to create symlink");
+                let result = canonicalize(&link).unwrap();
 
-                let result = canonicalize(&link_path).expect("canonicalize should succeed");
-
-                // Should NOT be "/"
-                assert_ne!(
-                    result,
-                    PathBuf::from("/"),
-                    "SECURITY BUG: Indirect symlink to /proc/{}/root resolved to /",
-                    pid
-                );
-
-                // Should preserve the /proc/PID/root prefix
-                assert!(
-                    result.starts_with(format!("/proc/{}/root", pid)),
-                    "Expected /proc/{}/root prefix, got: {:?}",
-                    pid,
-                    result
-                );
+                assert_ne!(result, PathBuf::from("/"));
+                assert_eq!(result, PathBuf::from(&target));
             }
 
             #[test]
-            fn test_indirect_symlink_to_proc_self_cwd() {
-                // Same vulnerability applies to /proc/self/cwd
-                let temp = tempfile::tempdir().expect("failed to create temp dir");
-                let link_path = temp.path().join("cwd_link");
+            fn symlink_to_cwd_preserved() {
+                let temp = tempfile::tempdir().unwrap();
+                let link = temp.path().join("link");
 
-                symlink("/proc/self/cwd", &link_path).expect("failed to create symlink");
+                symlink("/proc/self/cwd", &link).unwrap();
 
-                let result = canonicalize(&link_path).expect("canonicalize should succeed");
+                let result = canonicalize(&link).unwrap();
 
-                // Should preserve the /proc/self/cwd prefix
-                assert!(
-                    result.starts_with("/proc/self/cwd"),
-                    "Expected /proc/self/cwd prefix, got: {:?}",
-                    result
-                );
+                assert!(result.starts_with("/proc/self/cwd"));
             }
 
             #[test]
-            fn test_indirect_symlink_to_proc_thread_self_root() {
-                // Test thread-self variant
-                let temp = tempfile::tempdir().expect("failed to create temp dir");
-                let link_path = temp.path().join("thread_link");
-
-                symlink("/proc/thread-self/root", &link_path).expect("failed to create symlink");
-
-                // thread-self might not exist on all systems
-                if let Ok(result) = canonicalize(&link_path) {
-                    assert!(
-                        result.starts_with("/proc/thread-self/root"),
-                        "Expected /proc/thread-self/root prefix, got: {:?}",
-                        result
-                    );
-                }
-            }
-
-            #[test]
-            fn test_normal_symlink_not_affected() {
-                // Ensure normal symlinks (not pointing to /proc magic) still work
-                let temp = tempfile::tempdir().expect("failed to create temp dir");
+            fn normal_symlinks_work_like_std() {
+                let temp = tempfile::tempdir().unwrap();
                 let target = temp.path().join("target");
                 let link = temp.path().join("link");
 
-                std::fs::create_dir(&target).expect("failed to create target dir");
-                symlink(&target, &link).expect("failed to create symlink");
+                std::fs::create_dir(&target).unwrap();
+                symlink(&target, &link).unwrap();
 
-                let result = canonicalize(&link).expect("canonicalize should succeed");
-                let std_result =
-                    std::fs::canonicalize(&link).expect("std canonicalize should succeed");
+                let our_result = canonicalize(&link).unwrap();
+                let std_result = std::fs::canonicalize(&link).unwrap();
 
-                // Normal symlinks should resolve identically to std
-                assert_eq!(result, std_result);
+                assert_eq!(our_result, std_result);
             }
 
             #[test]
-            fn test_symlink_loop_does_not_hang() {
-                // Ensure we handle symlink loops gracefully
-                let temp = tempfile::tempdir().expect("failed to create temp dir");
-                let link_a = temp.path().join("link_a");
-                let link_b = temp.path().join("link_b");
+            fn symlink_loop_returns_error_not_hang() {
+                let temp = tempfile::tempdir().unwrap();
+                let link_a = temp.path().join("a");
+                let link_b = temp.path().join("b");
 
-                // Create circular symlinks
-                symlink(&link_b, &link_a).expect("failed to create link_a");
-                symlink(&link_a, &link_b).expect("failed to create link_b");
+                symlink(&link_b, &link_a).unwrap();
+                symlink(&link_a, &link_b).unwrap();
 
-                // Should return an error (too many symlinks), not hang
                 let result = canonicalize(&link_a);
-                assert!(result.is_err(), "Symlink loop should return error");
+
+                assert!(result.is_err());
+            }
+
+            #[test]
+            fn symlink_to_thread_self_root_preserved() {
+                let temp = tempfile::tempdir().unwrap();
+                let link = temp.path().join("thread_link");
+
+                symlink("/proc/thread-self/root", &link).unwrap();
+
+                // thread-self might not exist on all systems
+                if let Ok(result) = canonicalize(&link) {
+                    assert!(result.starts_with("/proc/thread-self/root"));
+                }
             }
         }
 
-        /// Security-focused tests for potential attack vectors.
-        ///
-        /// These tests verify protection against common path-based attacks
-        /// including path traversal, symlink escapes, and edge cases.
+        // ==========================================================================
+        // SECURITY EDGE CASES
+        // ==========================================================================
+
         mod security_tests {
             use super::*;
 
             #[test]
-            fn test_path_traversal_many_dotdot_at_boundary() {
-                // Attempt to escape namespace with excessive .. components
-                // /proc/self/root/../../../../../../../etc/passwd
-                let result = canonicalize("/proc/self/root/../../../../../../../etc/passwd");
+            fn excessive_dotdot_cannot_escape_root_namespace() {
+                let path = "/proc/self/root/../../../../../../../etc/passwd";
 
-                // This should either:
-                // 1. Preserve namespace prefix (if path resolves within)
-                // 2. Error out (if path is invalid)
-                // But NEVER resolve to /etc/passwd on the host
-                if let Ok(path) = result {
-                    assert!(
-                        path.starts_with("/proc/self/root"),
-                        "Path traversal should not escape namespace, got: {:?}",
-                        path
-                    );
+                if let Ok(result) = canonicalize(path) {
+                    assert!(result.starts_with("/proc/self/root"));
                 }
             }
 
             #[test]
-            fn test_canonicalize_idempotency() {
-                // Security property: canonicalize(canonicalize(x)) == canonicalize(x)
-                // If not idempotent, attackers could exploit the difference
-                let test_paths = ["/proc/self/root", "/proc/self/root/etc", "/proc/self/cwd"];
+            fn idempotent_canonicalization() {
+                let paths = ["/proc/self/root", "/proc/self/root/etc", "/proc/self/cwd"];
 
-                for path in &test_paths {
+                for path in &paths {
                     if let Ok(first) = canonicalize(path) {
                         if let Ok(second) = canonicalize(&first) {
-                            assert_eq!(
-                                first, second,
-                                "canonicalize should be idempotent for {:?}",
-                                path
-                            );
+                            assert_eq!(first, second);
                         }
                     }
                 }
             }
 
             #[test]
-            fn test_case_sensitivity_proc() {
-                // Linux is case-sensitive: /PROC should NOT match /proc
-                // This verifies we don't accidentally treat /PROC as a namespace
+            fn uppercase_proc_not_magic() {
                 let result = canonicalize("/PROC/self/root");
 
-                // /PROC/self/root should not exist (case-sensitive filesystem)
-                // or if it somehow does, it should not be treated as a namespace
                 match result {
-                    Ok(path) => {
-                        // If it somehow exists, it should NOT have /proc protection
-                        // (would be treated as normal path)
-                        assert!(
-                            !path.starts_with("/proc/"),
-                            "/PROC should not be treated as /proc namespace"
-                        );
-                    }
-                    Err(e) => {
-                        // Expected: NotFound because /PROC doesn't exist
-                        assert_eq!(e.kind(), io::ErrorKind::NotFound);
-                    }
+                    Ok(path) => assert!(!path.starts_with("/proc/")),
+                    Err(e) => assert_eq!(e.kind(), io::ErrorKind::NotFound),
                 }
             }
 
             #[test]
-            fn test_double_slash_normalization() {
-                // Paths with double slashes: //proc/self/root or /proc//self//root
-                // Verify they're handled correctly
-                let result = canonicalize("/proc/self/root");
-                if let Ok(normal) = result {
-                    // Path::new normalizes double slashes, so this should work the same
-                    let double_slash = canonicalize("//proc//self//root");
-                    if let Ok(ds_path) = double_slash {
-                        assert_eq!(normal, ds_path, "Double slashes should normalize correctly");
+            fn double_slashes_normalized() {
+                if let Ok(normal) = canonicalize("/proc/self/root") {
+                    if let Ok(doubled) = canonicalize("//proc//self//root") {
+                        assert_eq!(normal, doubled);
                     }
                 }
             }
 
             #[test]
-            fn test_trailing_slash_consistency() {
-                // /proc/self/root vs /proc/self/root/ should behave consistently
-                let without_slash = canonicalize("/proc/self/root");
-                let with_slash = canonicalize("/proc/self/root/");
-
-                if let (Ok(a), Ok(b)) = (without_slash, with_slash) {
-                    // Both should preserve the namespace
-                    assert!(a.starts_with("/proc/self/root"));
-                    assert!(b.starts_with("/proc/self/root"));
-                }
-                // If either fails, that's fine for this test
+            fn relative_proc_path_not_magic() {
+                // "proc/self/root" (no leading /) is relative, not magic
+                let _ = canonicalize("proc/self/root"); // Just shouldn't panic
             }
 
             #[test]
-            fn test_dot_components() {
-                // /proc/self/root/./etc should normalize to /proc/self/root/etc
-                let result = canonicalize("/proc/self/root/./etc");
-                if let Ok(path) = result {
-                    assert!(
-                        path.starts_with("/proc/self/root"),
-                        "Dot components should preserve namespace, got: {:?}",
-                        path
-                    );
-                    // Should not contain /./
-                    assert!(
-                        !path.to_string_lossy().contains("/./"),
-                        "Dot should be normalized out"
-                    );
-                }
-            }
-
-            #[test]
-            fn test_symlink_within_namespace_relative_escape_attempt() {
-                // Create a symlink inside a temp dir that tries to escape via relative path
-                // This tests symlink resolution staying within bounds
-                use std::os::unix::fs::symlink;
-
-                let temp = tempfile::tempdir().expect("failed to create temp dir");
-                let subdir = temp.path().join("subdir");
-                std::fs::create_dir(&subdir).expect("failed to create subdir");
-
-                // Create a symlink that tries to escape: subdir/escape -> ../../../../../../etc
-                let escape_link = subdir.join("escape");
-                symlink("../../../../../../etc", &escape_link).expect("failed to create symlink");
-
-                // Canonicalizing should resolve but this is a normal symlink
-                // (not through /proc), so std behavior applies
-                let result = canonicalize(&escape_link);
-                // Just verify it doesn't panic and behaves like std
-                if let Ok(path) = &result {
-                    let std_result = std::fs::canonicalize(&escape_link);
-                    if let Ok(std_path) = std_result {
-                        assert_eq!(*path, std_path);
-                    }
-                }
-            }
-
-            #[test]
-            fn test_empty_path() {
-                // Empty path should error
-                let result = canonicalize("");
-                assert!(result.is_err(), "Empty path should error");
-            }
-
-            #[test]
-            fn test_relative_path_not_mistaken_for_proc() {
-                // A relative path "proc/self/root" should NOT be treated as /proc/self/root
-                let result = canonicalize("proc/self/root");
-
-                // Should either error (doesn't exist) or resolve relative to cwd
-                // But should NOT get namespace treatment
-                // The key verification is that find_namespace_boundary rejects relative paths
-                let _ = result; // Result depends on whether relative path exists
-            }
-
-            #[test]
-            fn test_proc_without_pid() {
-                // /proc/root (missing PID) should not be treated as namespace boundary
+            fn missing_pid_not_namespace() {
                 let result = find_namespace_boundary(Path::new("/proc/root"));
-                assert!(
-                    result.is_none(),
-                    "/proc/root (no PID) should not be a namespace boundary"
-                );
+                assert!(result.is_none());
             }
 
             #[test]
-            fn test_proc_invalid_special_names() {
-                // Only "self" and "thread-self" are valid special PIDs
-                // Others like "parent" or "init" should not be treated as namespace
-                for invalid in &["parent", "init", "current", "me"] {
-                    let path = format!("/proc/{}/root", invalid);
-                    let result = find_namespace_boundary(Path::new(&path));
-                    assert!(
-                        result.is_none(),
-                        "/proc/{}/root should not be a namespace boundary",
-                        invalid
-                    );
+            fn invalid_special_names_not_namespace() {
+                for name in &["parent", "init", "current", "me"] {
+                    let path = format!("/proc/{}/root", name);
+                    assert!(find_namespace_boundary(Path::new(&path)).is_none());
                 }
             }
 
             #[test]
-            fn test_very_long_pid() {
-                // PIDs have a max value (typically 4194304 on 64-bit Linux)
-                // But we accept any numeric string - verify no overflow/panic
+            fn long_numeric_pid_accepted() {
                 let long_pid = "9".repeat(100);
                 let path = format!("/proc/{}/root", long_pid);
-                let result = find_namespace_boundary(Path::new(&path));
-                // Should be detected as a namespace boundary (syntactically valid)
-                assert!(
-                    result.is_some(),
-                    "Very long numeric PID should be syntactically accepted"
-                );
+                assert!(find_namespace_boundary(Path::new(&path)).is_some());
             }
 
             #[test]
-            fn test_pid_zero() {
-                // PID 0 is the kernel scheduler, not a real process
-                // But syntactically it's a valid PID format
-                let result = find_namespace_boundary(Path::new("/proc/0/root"));
-                assert!(result.is_some(), "PID 0 is syntactically valid");
-
-                // Canonicalizing will likely fail since /proc/0/root doesn't exist
-                let canon = canonicalize("/proc/0/root");
-                assert!(canon.is_err(), "/proc/0/root should not exist");
+            fn pid_zero_syntactically_valid() {
+                assert!(find_namespace_boundary(Path::new("/proc/0/root")).is_some());
+                assert!(canonicalize("/proc/0/root").is_err()); // But doesn't exist
             }
 
             #[test]
-            fn test_negative_pid_rejected() {
-                // Negative PIDs are invalid
-                let result = find_namespace_boundary(Path::new("/proc/-1/root"));
-                assert!(
-                    result.is_none(),
-                    "Negative PID should not be a namespace boundary"
-                );
+            fn negative_pid_not_valid() {
+                assert!(find_namespace_boundary(Path::new("/proc/-1/root")).is_none());
             }
 
             #[test]
-            fn test_pid_with_leading_zeros() {
-                // PIDs like "0001234" - are these valid?
-                // Syntactically they're all digits, so we accept them
-                let result = find_namespace_boundary(Path::new("/proc/0001234/root"));
-                assert!(
-                    result.is_some(),
-                    "PID with leading zeros is syntactically valid"
-                );
+            fn leading_zeros_in_pid_accepted() {
+                assert!(find_namespace_boundary(Path::new("/proc/0001234/root")).is_some());
             }
 
             #[test]
-            fn test_symlink_to_proc_subpath() {
-                // Symlink pointing deep into /proc: link -> /proc/self/root/etc
+            fn symlink_to_deep_proc_path_preserves_prefix() {
                 use std::os::unix::fs::symlink;
-                let temp = tempfile::tempdir().expect("failed to create temp dir");
-                let link = temp.path().join("deep_link");
-                symlink("/proc/self/root/etc", &link).expect("failed to create symlink");
 
-                let result = canonicalize(&link);
-                if let Ok(path) = result {
-                    assert!(
-                        path.starts_with("/proc/self/root"),
-                        "Symlink to /proc subpath should preserve prefix, got: {:?}",
-                        path
-                    );
+                let temp = tempfile::tempdir().unwrap();
+                let link = temp.path().join("link");
+
+                symlink("/proc/self/root/etc", &link).unwrap();
+
+                if let Ok(result) = canonicalize(&link) {
+                    assert!(result.starts_with("/proc/self/root"));
                 }
             }
 
             #[test]
-            fn test_symlink_interception() {
-                // link1 -> link2 -> /proc/self/root
+            fn relative_symlink_looking_like_proc_not_magic() {
                 use std::os::unix::fs::symlink;
-                let temp = tempfile::tempdir().expect("failed to create temp dir");
-                let link2 = temp.path().join("link2");
-                let link1 = temp.path().join("link1");
 
-                symlink("/proc/self/root", &link2).expect("failed to create link2");
-                symlink(&link2, &link1).expect("failed to create link1");
+                let temp = tempfile::tempdir().unwrap();
+                let fake_proc = temp.path().join("proc/self/root");
+                std::fs::create_dir_all(fake_proc).unwrap();
 
-                let result = canonicalize(&link1).expect("should succeed");
-                assert!(
-                    result.starts_with("/proc/self/root"),
-                    "Chain of symlinks should be detected"
-                );
+                let link = temp.path().join("link");
+                symlink("proc/self/root", &link).unwrap();
+
+                let result = canonicalize(&link).unwrap();
+
+                assert!(!result.starts_with("/proc/self/root"));
+                assert!(result.starts_with(temp.path()));
             }
 
             #[test]
-            fn test_symlink_to_relative_proc_name() {
-                // link -> "proc/self/root" (relative path, not absolute /proc)
-                // This should NOT be treated as magic unless it resolves to absolute /proc
+            fn relative_symlink_escape_behaves_like_std() {
+                // Normal symlink (not to /proc) that attempts path traversal escape
+                // Must behave exactly like std::fs::canonicalize
                 use std::os::unix::fs::symlink;
-                let temp = tempfile::tempdir().expect("failed to create temp dir");
-                let link = temp.path().join("rel_link");
 
-                // Create a fake proc dir locally to make the link valid
-                let fake_proc = temp.path().join("proc/self/root");
-                std::fs::create_dir_all(fake_proc).expect("failed to create fake proc");
+                let temp = tempfile::tempdir().unwrap();
+                let subdir = temp.path().join("subdir");
+                std::fs::create_dir(&subdir).unwrap();
 
-                symlink("proc/self/root", &link).expect("failed to create symlink");
+                let escape_link = subdir.join("escape");
+                symlink("../../../../../../etc", &escape_link).unwrap();
 
-                let result = canonicalize(&link).expect("should succeed");
+                let our_result = canonicalize(&escape_link);
+                let std_result = std::fs::canonicalize(&escape_link);
 
-                // Should resolve to the temp dir path, NOT /proc/self/root
-                assert!(
-                    !result.starts_with("/proc/self/root"),
-                    "Relative path looking like proc should not be magic"
-                );
-                assert!(
-                    result.starts_with(temp.path()),
-                    "Should resolve to temp dir"
-                );
+                match (our_result, std_result) {
+                    (Ok(ours), Ok(stds)) => assert_eq!(ours, stds),
+                    (Err(_), Err(_)) => {} // Both error is fine
+                    _ => panic!("Behavior should match std"),
+                }
             }
         }
     }
