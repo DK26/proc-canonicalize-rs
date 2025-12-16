@@ -22,14 +22,10 @@ However, `std::fs::canonicalize` resolves this magic symlink to `/`, **breaking 
 use std::path::Path;
 
 // BROKEN: std::fs::canonicalize loses the namespace prefix!
-let std_resolved = std::fs::canonicalize("/proc/self/root")?;
-assert_eq!(std_resolved, Path::new("/"));  // Resolves to "/" - host root!
+let std_resolved = std::fs::canonicalize("/proc/self/root/etc")?;
+assert_eq!(std_resolved, Path::new("/etc"));  // Resolves to host's /etc!
 
 // FIXED: Namespace prefix is preserved!
-let resolved = proc_canonicalize::canonicalize("/proc/self/root")?;
-assert_eq!(resolved, Path::new("/proc/self/root"));
-
-// Paths through the boundary also preserve the prefix
 let resolved = proc_canonicalize::canonicalize("/proc/self/root/etc")?;
 assert_eq!(resolved, Path::new("/proc/self/root/etc"));
 ```
