@@ -16,31 +16,18 @@ On Linux, `/proc/PID/root` is a "magic symlink" that crosses into a process's mo
 cat /proc/1234/root/etc/os-release  # Shows container's OS, not host's!
 ```
 
-However, `std::fs::canonicalize` resolves this magic symlink to `/`, **breaking security boundaries**:
+However, `std::fs::canonicalize` resolves this magic symlink to `/`, **breaking security boundaries**. This crate preserves the `/proc/PID/root`, `/proc/PID/cwd`, and `/proc/PID/task/TID/root` prefixes:
 
 ```rust
-use std::path::PathBuf;
+use std::path::Path;
 
 // BROKEN: std::fs::canonicalize loses the namespace prefix!
-let resolved = std::fs::canonicalize("/proc/self/root")?;
-assert_eq!(resolved, PathBuf::from("/"));  // Resolves to "/" - host root!
-```
-
-## The Fix
-
-This crate preserves the `/proc/PID/root`, `/proc/PID/cwd`, and `/proc/PID/task/TID/root` prefixes:
-
-```rust
-use proc_canonicalize::canonicalize;
-use std::path::PathBuf;
+let std_resolved = std::fs::canonicalize("/proc/self/root/etc")?;
+assert_eq!(std_resolved, Path::new("/etc"));  // Resolves to host's /etc!
 
 // FIXED: Namespace prefix is preserved!
-let resolved = canonicalize("/proc/self/root")?;
-assert_eq!(resolved, PathBuf::from("/proc/self/root"));
-
-// Paths through the boundary also preserve the prefix
-let resolved = canonicalize("/proc/self/root/etc")?;
-assert!(resolved.starts_with("/proc/self/root"));
+let resolved = proc_canonicalize::canonicalize("/proc/self/root/etc")?;
+assert_eq!(resolved, Path::new("/proc/self/root/etc"));
 ```
 
 ## Use Case
@@ -55,8 +42,8 @@ Container monitoring and security tools that need to:
 use proc_canonicalize::canonicalize;
 
 fn read_container_file(container_pid: u32, path: &str) -> std::io::Result<Vec<u8>> {
-    let container_root = format!("/proc/{}/root", container_pid);
-    let full_path = format!("{}{}", container_root, path);
+    let container_root = format!("/proc/{container_pid}/root");
+    let full_path = format!("{container_root}/{path}");
 
     let canonical = canonicalize(&full_path)?;
 
@@ -94,7 +81,7 @@ Simplifies Windows extended-length paths by removing the `\\?\` prefix when poss
 
 ```toml
 [dependencies]
-proc-canonicalize = { version = "0.1.1", features = ["dunce"] }
+proc-canonicalize = { version = "0.1.2", features = ["dunce"] }
 ```
 
 **Behavior:**
@@ -113,7 +100,7 @@ This crate has **no dependencies** beyond the Rust standard library.
 
 ```toml
 [dependencies]
-proc-canonicalize = "0.1.1"
+proc-canonicalize = "0.1.2"
 ```
 
 ## License

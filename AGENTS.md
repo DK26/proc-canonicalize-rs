@@ -134,6 +134,15 @@ assert_eq!(std_result, PathBuf::from("/"));  // std breaks it
 assert_eq!(our_result, PathBuf::from("/proc/self/root"));  // we fix it
 ```
 
+### Code Example Style for Clarity
+
+1. **Use fully qualified paths when comparing APIs**: Show `std::fs::canonicalize` vs `proc_canonicalize::canonicalize` side-by-side so readers see the difference without mental mapping.
+2. **Prefer exact comparisons over partial checks**: Use `assert_eq!(path, Path::new("/proc/self/root"))` instead of `assert!(path.starts_with("/proc/self/root"))`. Exact values reduce cognitive load.
+3. **Use `Path::new()` over `PathBuf::from()`**: For assertions, `Path::new("/proc/self/root")` is cleaner than `PathBuf::from("/proc/self/root")` since `PathBuf` derefs to `Path`.
+4. **Merge related examples**: When showing problem vs solution, use one code block with both to make the contrast obvious.
+5. **Use modern format syntax**: Prefer `format!("/proc/{container_pid}/root")` over `format!("/proc/{}/root", container_pid)`.
+6. **Choose information-dense examples**: Use one rich example that demonstrates multiple properties instead of multiple simple examples. For instance, `/proc/self/root/etc` shows both namespace preservation AND path resolution, eliminating the need for separate `/proc/self/root` and `/proc/self/root/etc` examples.
+
 ### Rules for `lib.rs` Examples
 
 1. **Use `assert!` macros**: When showing behavior, use assertions to prove the claim.
