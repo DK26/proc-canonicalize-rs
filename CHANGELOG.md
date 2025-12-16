@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2025-12-16
+
+### Changed
+
+- **Documentation**: Improved code examples to use information-dense patterns (single `/proc/self/root/etc` example instead of multiple)
+- **Documentation**: Updated examples to use modern format syntax and `Path::new()` for cleaner assertions
+
 ## [0.1.1] - 2025-12-15
 
 ### Changed
