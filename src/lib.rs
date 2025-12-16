@@ -6,40 +6,26 @@
 //! ## The Problem
 //!
 //! On Linux, `/proc/PID/root` is a "magic symlink" that crosses into a process's
-//! mount namespace. However, `std::fs::canonicalize` resolves it to `/`, losing
-//! the namespace context:
+//! mount namespace. However, `std::fs::canonicalize` resolves it to `/`, breaking
+//! security boundaries. This crate preserves the `/proc/PID/root` and `/proc/PID/cwd`
+//! prefixes:
 //!
 //! ```rust
 //! # #[cfg(target_os = "linux")]
 //! # fn main() -> std::io::Result<()> {
-//! // The kernel resolves /proc/self/root to "/" - losing the namespace boundary!
-//! let resolved = std::fs::canonicalize("/proc/self/root")?;
-//! assert_eq!(resolved, std::path::PathBuf::from("/"));
-//! # Ok(())
-//! # }
-//! # #[cfg(not(target_os = "linux"))]
-//! # fn main() {}
-//! ```
+//! use std::path::Path;
 //!
-//! This breaks security tools that use `/proc/PID/root` as a boundary for container
-//! filesystem access, because the boundary resolves to the host root!
+//! // BROKEN: std::fs::canonicalize loses the namespace prefix!
+//! let std_resolved = std::fs::canonicalize("/proc/self/root")?;
+//! assert_eq!(std_resolved, Path::new("/"));  // Resolves to "/" - host root!
 //!
-//! ## The Fix
-//!
-//! This crate detects `/proc/PID/root` and `/proc/PID/cwd` prefixes and preserves them:
-//!
-//! ```rust
-//! # #[cfg(target_os = "linux")]
-//! # fn main() -> std::io::Result<()> {
-//! use std::path::PathBuf;
-//!
-//! // The namespace boundary is preserved!
+//! // FIXED: Namespace prefix is preserved!
 //! let resolved = proc_canonicalize::canonicalize("/proc/self/root")?;
-//! assert_eq!(resolved, PathBuf::from("/proc/self/root"));
+//! assert_eq!(resolved, Path::new("/proc/self/root"));
 //!
 //! // Paths through the boundary also preserve the prefix
 //! let resolved = proc_canonicalize::canonicalize("/proc/self/root/etc")?;
-//! assert!(resolved.starts_with("/proc/self/root"));
+//! assert_eq!(resolved, Path::new("/proc/self/root/etc"));
 //! # Ok(())
 //! # }
 //! # #[cfg(not(target_os = "linux"))]
@@ -88,13 +74,13 @@ const MAX_SYMLINK_FOLLOWS: u32 = 40;
 /// ```rust
 /// # #[cfg(target_os = "linux")]
 /// # fn main() -> std::io::Result<()> {
-/// use std::path::PathBuf;
+/// use std::path::Path;
 /// use proc_canonicalize::canonicalize;
 ///
 /// // On Linux, the namespace prefix is preserved
 /// let path = "/proc/self/root";
 /// let canonical = canonicalize(path)?;
-/// assert_eq!(canonical, PathBuf::from("/proc/self/root"));
+/// assert_eq!(canonical, Path::new("/proc/self/root"));
 /// # Ok(())
 /// # }
 /// # #[cfg(not(target_os = "linux"))]
@@ -499,8 +485,8 @@ mod tests {
         fn reading_container_file_from_host() {
             // Real-world pattern: Host process reads a container's /etc/hostname
             let container_pid = std::process::id(); // In reality, this would be a container's PID
-            let container_root = format!("/proc/{}/root", container_pid);
-            let file_inside_container = format!("{}/etc", container_root);
+            let container_root = format!("/proc/{container_pid}/root");
+            let file_inside_container = format!("{container_root}/etc");
 
             let canonical_path = canonicalize(file_inside_container).unwrap();
 
@@ -512,8 +498,8 @@ mod tests {
         fn validating_path_stays_in_container() {
             // Security pattern: Verify a user-provided path doesn't escape container
             let container_pid = std::process::id();
-            let container_root = format!("/proc/{}/root", container_pid);
-            let user_requested_file = format!("{}/etc/passwd", container_root);
+            let container_root = format!("/proc/{container_pid}/root");
+            let user_requested_file = format!("{container_root}/etc/passwd");
 
             let canonical = canonicalize(user_requested_file).unwrap();
 
@@ -530,10 +516,10 @@ mod tests {
             let std_result = std::fs::canonicalize(path).unwrap();
 
             // std breaks it: returns "/"
-            assert_eq!(std_result, PathBuf::from("/"));
+            assert_eq!(std_result, Path::new("/"));
 
             // we fix it: preserves the namespace
-            assert_eq!(our_result, PathBuf::from("/proc/self/root"));
+            assert_eq!(our_result, Path::new("/proc/self/root"));
         }
 
         #[test]
@@ -542,19 +528,19 @@ mod tests {
 
             let result = canonicalize(path).unwrap();
 
-            assert_eq!(result, PathBuf::from("/proc/self/cwd"));
+            assert_eq!(result, Path::new("/proc/self/cwd"));
         }
 
         #[test]
         fn explicit_pid_root_preserved() {
             let my_pid = std::process::id();
-            let path = format!("/proc/{}/root", my_pid);
+            let path = format!("/proc/{my_pid}/root");
 
             let our_result = canonicalize(&path).unwrap();
             let std_result = std::fs::canonicalize(&path).unwrap();
 
-            assert_eq!(std_result, PathBuf::from("/"));
-            assert_eq!(our_result, PathBuf::from(&path));
+            assert_eq!(std_result, Path::new("/"));
+            assert_eq!(our_result, Path::new(&path));
         }
 
         #[test]
@@ -750,10 +736,10 @@ mod tests {
             let my_pid = std::process::id();
 
             let self_result = canonicalize("/proc/self/root").unwrap();
-            let pid_result = canonicalize(format!("/proc/{}/root", my_pid)).unwrap();
+            let pid_result = canonicalize(format!("/proc/{my_pid}/root")).unwrap();
 
-            assert_eq!(self_result, PathBuf::from("/proc/self/root"));
-            assert_eq!(pid_result, PathBuf::from(format!("/proc/{}/root", my_pid)));
+            assert_eq!(self_result, Path::new("/proc/self/root"));
+            assert_eq!(pid_result, Path::new(&format!("/proc/{my_pid}/root")));
         }
 
         // ==========================================================================
@@ -773,8 +759,8 @@ mod tests {
 
                 let result = canonicalize(&link).unwrap();
 
-                assert_ne!(result, PathBuf::from("/")); // NOT the broken behavior
-                assert_eq!(result, PathBuf::from("/proc/self/root"));
+                assert_ne!(result, Path::new("/")); // NOT the broken behavior
+                assert_eq!(result, Path::new("/proc/self/root"));
             }
 
             #[test]
@@ -800,13 +786,13 @@ mod tests {
 
                 let result = canonicalize(&link1).unwrap();
 
-                assert_eq!(result, PathBuf::from("/proc/self/root"));
+                assert_eq!(result, Path::new("/proc/self/root"));
             }
 
             #[test]
             fn symlink_to_explicit_pid_root_preserved() {
                 let my_pid = std::process::id();
-                let target = format!("/proc/{}/root", my_pid);
+                let target = format!("/proc/{my_pid}/root");
                 let temp = tempfile::tempdir().unwrap();
                 let link = temp.path().join("link");
 
@@ -814,8 +800,8 @@ mod tests {
 
                 let result = canonicalize(&link).unwrap();
 
-                assert_ne!(result, PathBuf::from("/"));
-                assert_eq!(result, PathBuf::from(&target));
+                assert_ne!(result, Path::new("/"));
+                assert_eq!(result, Path::new(&target));
             }
 
             #[test]
@@ -936,7 +922,7 @@ mod tests {
             #[test]
             fn invalid_special_names_not_namespace() {
                 for name in &["parent", "init", "current", "me"] {
-                    let path = format!("/proc/{}/root", name);
+                    let path = format!("/proc/{name}/root");
                     assert!(find_namespace_boundary(Path::new(&path)).is_none());
                 }
             }
@@ -944,7 +930,7 @@ mod tests {
             #[test]
             fn long_numeric_pid_accepted() {
                 let long_pid = "9".repeat(100);
-                let path = format!("/proc/{}/root", long_pid);
+                let path = format!("/proc/{long_pid}/root");
                 assert!(find_namespace_boundary(Path::new(&path)).is_some());
             }
 

@@ -46,8 +46,8 @@ Container monitoring and security tools that need to:
 use proc_canonicalize::canonicalize;
 
 fn read_container_file(container_pid: u32, path: &str) -> std::io::Result<Vec<u8>> {
-    let container_root = format!("/proc/{}/root", container_pid);
-    let full_path = format!("{}{}", container_root, path);
+    let container_root = format!("/proc/{container_pid}/root");
+    let full_path = format!("{container_root}/{path}");
 
     let canonical = canonicalize(&full_path)?;
 
