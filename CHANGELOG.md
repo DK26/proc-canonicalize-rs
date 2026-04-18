@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-04-18
+
+### Security
+
+- Fixed namespace-boundary bypass via `..` in the PID prefix. Paths like `/proc/<PID>/../<PID>/root` lexically normalize to `/proc/<PID>/root` but previously evaded detection, fell through to `std::fs::canonicalize`, and returned `/` — silently dropping the namespace boundary. The scanner now lexically normalizes before boundary detection so these paths are preserved correctly.
+
+### Performance
+
+- Eliminated per-iteration heap allocations in the indirect-symlink scanner. Scratch buffers are now hoisted above the scan loop and reused via `push`/`pop`/`swap`, reducing allocator pressure for callers that invoke `canonicalize` in hot paths.
+
 ## [0.1.2] - 2025-12-16
 
 ### Changed
@@ -126,7 +136,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Zero runtime dependencies (dunce is optional and Windows-only)
 - Comprehensive test suite for namespace boundary detection
 
-[Unreleased]: https://github.com/DK26/proc-canonicalize-rs/compare/v0.0.4...HEAD
+[Unreleased]: https://github.com/DK26/proc-canonicalize-rs/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/DK26/proc-canonicalize-rs/compare/v0.1.2...v0.1.3
 [0.0.4]: https://github.com/DK26/proc-canonicalize-rs/compare/v0.0.3...v0.0.4
 [0.0.3]: https://github.com/DK26/proc-canonicalize-rs/compare/v0.0.2...v0.0.3
 [0.0.2]: https://github.com/DK26/proc-canonicalize-rs/compare/v0.0.1...v0.0.2
