@@ -284,28 +284,28 @@ fn is_proc_magic_path(path: &Path) -> bool {
     namespace_prefix_len(path).is_some()
 }
 
-/// Lexically normalize `.` and `..` components in a path without consulting the filesystem.
+/// Lexically normalize `.` and `..` components from `path` into `out`.
 ///
-/// This is purely symbolic — it does NOT follow symlinks. `..` at root is a no-op.
+/// Purely symbolic — does NOT follow symlinks. `..` at root is a no-op. `out` is
+/// cleared before use so callers can reuse a buffer across calls.
 ///
 /// Used to catch namespace-boundary bypasses where `..` in the prefix defeats
 /// lexical matching in [`find_namespace_boundary`], e.g. `/proc/<PID>/../<PID>/root`
 /// lexically normalizes to `/proc/<PID>/root`.
 #[cfg(target_os = "linux")]
-fn lexical_normalize(path: &Path) -> PathBuf {
-    let mut result = PathBuf::new();
+fn lexical_normalize_into(path: &Path, out: &mut PathBuf) {
+    out.clear();
     for component in path.components() {
         match component {
-            Component::RootDir => result.push(component.as_os_str()),
-            Component::Normal(name) => result.push(name),
+            Component::RootDir => out.push(component.as_os_str()),
+            Component::Normal(name) => out.push(name),
             Component::ParentDir => {
-                result.pop();
+                out.pop();
             }
             Component::CurDir => {}
             Component::Prefix(_) => unreachable!("Linux paths don't have prefixes"),
         }
     }
-    result
 }
 
 /// Detect if a path contains an indirect symlink to a `/proc` magic path.
@@ -316,11 +316,20 @@ fn lexical_normalize(path: &Path) -> PathBuf {
 /// Returns `Some(magic_path)` with any remaining suffix if found, or `None` otherwise.
 #[cfg(target_os = "linux")]
 fn detect_indirect_proc_magic_link(path: &Path) -> io::Result<Option<PathBuf>> {
+    // One-time owned copy at entry: the scan mutates `current_path` across
+    // symlink follows, so we must own it; borrowing `&Path` is not viable here.
     let mut current_path = if path.is_absolute() {
         path.to_path_buf()
     } else {
         std::env::current_dir()?.join(path)
     };
+
+    // Scratch buffers reused across scan iterations so the hot loop does no
+    // per-iteration heap allocation. Sized to the input path up-front; push/pop
+    // may still grow on longer symlink targets, but most cases fit.
+    let cap = current_path.as_os_str().len();
+    let mut accumulated = PathBuf::with_capacity(cap);
+    let mut normalized = PathBuf::with_capacity(cap);
 
     let mut iterations = 0;
 
@@ -352,12 +361,12 @@ fn detect_indirect_proc_magic_link(path: &Path) -> io::Result<Option<PathBuf>> {
         //    with remainder `../root`. Returning it as-is sends the caller down
         //    the host-resolution path in canonicalize_impl, which loses the
         //    boundary. Lexical normalization gives /proc/<PID>/root directly.
-        let normalized = lexical_normalize(&current_path);
+        lexical_normalize_into(&current_path, &mut normalized);
         if is_proc_magic_path(&normalized) {
-            return Ok(Some(normalized));
+            return Ok(Some(std::mem::take(&mut normalized)));
         }
 
-        let mut accumulated = PathBuf::new();
+        accumulated.clear();
         let mut components = current_path.components().peekable();
 
         if let Some(Component::RootDir) = components.peek() {
@@ -375,53 +384,41 @@ fn detect_indirect_proc_magic_link(path: &Path) -> io::Result<Option<PathBuf>> {
                     accumulated.pop();
                     // After popping, we might be at a magic path (e.g. /proc/self/root/etc/..)
                     if is_proc_magic_path(&accumulated) {
-                        // Reconstruct full path from here to preserve the magic prefix
-                        let remainder: PathBuf = components.collect();
-                        return Ok(Some(accumulated.join(remainder)));
+                        // Append remaining components in place to preserve the suffix.
+                        accumulated.extend(components);
+                        return Ok(Some(std::mem::take(&mut accumulated)));
                     }
                 }
                 Component::Normal(name) => {
-                    let next_path = accumulated.join(name);
+                    // Push first, then probe. On symlink we pop back to the parent
+                    // before resolving so relative targets rebase correctly.
+                    accumulated.push(name);
 
-                    // Check symlink
-                    let metadata = match std::fs::symlink_metadata(&next_path) {
+                    let metadata = match std::fs::symlink_metadata(&accumulated) {
                         Ok(m) => m,
-                        Err(_) => {
-                            accumulated.push(name);
-                            continue;
-                        }
+                        Err(_) => continue,
                     };
 
                     if metadata.is_symlink() {
-                        // Found symlink!
                         iterations += 1;
-                        let target = std::fs::read_link(&next_path)?;
-
-                        // Construct new path: accumulated (parent) + target + remainder
-                        let parent = next_path.parent().unwrap_or(Path::new("/"));
-                        let remainder: PathBuf = components.collect();
-
-                        let resolved = if target.is_relative() {
-                            parent.join(target)
-                        } else {
-                            target
-                        };
-
-                        current_path = resolved.join(remainder);
-                        continue 'scan; // Restart scan from root of new path
+                        // std::fs::read_link returns an owned PathBuf; no borrowing API exists.
+                        let target = std::fs::read_link(&accumulated)?;
+                        accumulated.pop(); // drop the symlink name
+                                           // PathBuf::push replaces when target is absolute, appends when relative.
+                        accumulated.push(target);
+                        accumulated.extend(components);
+                        std::mem::swap(&mut current_path, &mut accumulated);
+                        continue 'scan;
                     }
-
-                    accumulated.push(name);
                 }
                 Component::Prefix(_) => unreachable!("Linux paths don't have prefixes"),
             }
         }
 
-        // If we reached here, we scanned the whole path and found no symlinks (or no more symlinks).
-        // And it wasn't magic (checked at start of loop).
-        // One final check on the accumulated path (which is effectively normalized now)
+        // Scanned the whole path, no symlinks remain and the normalized form
+        // wasn't magic. One final check on the accumulated path.
         if is_proc_magic_path(&accumulated) {
-            return Ok(Some(accumulated));
+            return Ok(Some(std::mem::take(&mut accumulated)));
         }
 
         return Ok(None);
